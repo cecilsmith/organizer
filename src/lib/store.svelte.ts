@@ -6,7 +6,9 @@ export type SourceFilter = "all" | "reminders" | "github";
 export type GroupBy = "source" | "due";
 /** Whether reminder notes show under every row, or only the selected one. */
 export type ShowNotes = "always" | "selected";
-export type View = "list" | "calendar";
+export type View = "list" | "calendar" | "gantt";
+export type GanttZoom = "day" | "week" | "month";
+export type GanttGroup = "source" | "area";
 export type CalView = "month" | "week" | "day";
 
 /** One undoable change: how to reverse it, and how to apply it again. */
@@ -41,6 +43,8 @@ interface Prefs {
   calView: CalView;
   weekStart: number;
   showUnscheduled: boolean;
+  ganttZoom: GanttZoom;
+  ganttGroup: GanttGroup;
 }
 
 function loadPrefs(): Partial<Prefs> {
@@ -65,6 +69,8 @@ class Store {
   /** 0 = Sunday, 1 = Monday. */
   weekStart = $state(0);
   showUnscheduled = $state(true);
+  ganttZoom = $state<GanttZoom>("week");
+  ganttGroup = $state<GanttGroup>("source");
   /** Set to prefill the quick-add due date (`YYYY-MM-DD` or with `THH:MM`). */
   quickAddDue = $state<string | null>(null);
   settingsOpen = $state(false);
@@ -101,6 +107,8 @@ class Store {
     if (p.calView) this.calView = p.calView;
     if (p.weekStart === 0 || p.weekStart === 1) this.weekStart = p.weekStart;
     if (typeof p.showUnscheduled === "boolean") this.showUnscheduled = p.showUnscheduled;
+    if (p.ganttZoom) this.ganttZoom = p.ganttZoom;
+    if (p.ganttGroup) this.ganttGroup = p.ganttGroup;
     if (p.sourceFilter) this.sourceFilter = p.sourceFilter;
   }
 
@@ -117,6 +125,8 @@ class Store {
           calView: this.calView,
           weekStart: this.weekStart,
           showUnscheduled: this.showUnscheduled,
+          ganttZoom: this.ganttZoom,
+          ganttGroup: this.ganttGroup,
         } satisfies Prefs),
       );
     } catch {
@@ -368,31 +378,59 @@ class Store {
     this.calDate = ymd(new Date());
   }
 
+  /** Cycles List → Calendar → Gantt (V). */
+  nextView() {
+    const order: View[] = ["list", "calendar", "gantt"];
+    this.setView(order[(order.indexOf(this.view) + 1) % order.length]);
+  }
+
   setView(view: View) {
     this.view = view;
     this.menuFor = null;
     this.savePrefs();
   }
 
-  /**
-   * Moves a reminder to another day (keeping its time unless `due` has one).
-   * GitHub dates come from milestones and project fields, so they can't be
-   * dragged here.
-   */
+  /** Whether an item's dates can be changed from the calendar or Gantt chart. */
+  canReschedule(item: Item, which: "start" | "due" = "due"): boolean {
+    if (item.completed) return false;
+    if (item.kind === "reminder") return which === "due";
+    const pd = item.projectDates;
+    return !!pd && !!(which === "start" ? pd.startField : pd.dueField);
+  }
+
+  /** Moves an item's due date (calendar drag). Reminders keep their time unless `due` has one. */
   async reschedule(item: Item, due: string) {
-    if (item.kind !== "reminder") {
-      this.toast("GitHub dates come from milestones or project fields — change them on GitHub.", "info");
+    if (due === (item.due ?? "")) return;
+    if (!this.canReschedule(item)) {
+      this.toast("This item's date comes from a milestone or iteration — change it on GitHub.", "info");
       return;
     }
-    if (due === item.due) return;
-    const prev = item.due ?? "";
-    this.overrides[item.id] = { ...this.overrides[item.id], due };
+    await this.setDates(item, undefined, item.kind === "reminder" ? due : due.slice(0, 10));
+  }
+
+  /**
+   * Changes an item's start and/or due date, with undo. `undefined` leaves a
+   * date alone; `""` clears it.
+   */
+  async setDates(item: Item, start: string | undefined, due: string | undefined) {
+    const prev = { start: item.start ?? "", due: item.due ?? "" };
+    const changed: Partial<Item> = {};
+    if (start !== undefined) changed.start = start || null;
+    if (due !== undefined) changed.due = due || null;
+    this.overrides[item.id] = { ...this.overrides[item.id], ...changed };
+    const arg = (v: string | undefined) => (v === undefined ? null : v);
     try {
-      const updated = await api.updateItem(item.id, { due }, item);
+      const updated = await api.setDates(item.id, arg(start), arg(due), item);
       this.record(
         `reschedule “${item.title}”`,
-        () => api.updateItem(item.id, { due: prev }, updated),
-        () => api.updateItem(item.id, { due }, item),
+        () =>
+          api.setDates(
+            item.id,
+            start === undefined ? null : prev.start,
+            due === undefined ? null : prev.due,
+            updated,
+          ),
+        () => api.setDates(item.id, arg(start), arg(due), item),
       );
       await this.refresh();
     } catch (e) {
@@ -400,6 +438,7 @@ class Store {
     } finally {
       const o = this.overrides[item.id];
       if (o) {
+        delete o.start;
         delete o.due;
         if (Object.keys(o).length === 0) delete this.overrides[item.id];
       }

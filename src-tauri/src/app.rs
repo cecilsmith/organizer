@@ -534,6 +534,52 @@ impl App {
         self.update_cached(id, |i| i.completed = completed)
     }
 
+    /// Changes an item's start and/or due date (the Gantt chart's drag and
+    /// resize). `None` leaves a date alone; `Some("")` clears it. Reminders
+    /// have no start date, so only `due` applies to them.
+    pub async fn set_dates(
+        &self,
+        id: &str,
+        start: Option<String>,
+        due: Option<String>,
+        fallback: Option<Item>,
+    ) -> Result<Item> {
+        let item = self.item_or(id, fallback)?;
+        if item.kind == ItemKind::Reminder {
+            if start.is_some() {
+                return Err(Error::msg("reminders don't have start dates"));
+            }
+            return self.update_item(id, ItemPatch { due, ..Default::default() }, Some(item)).await;
+        }
+        let dates = item.project_dates.clone().ok_or_else(|| {
+            Error::msg("this item's dates come from a milestone or iteration — add it to a project with date fields to edit them here")
+        })?;
+        let (account, token) = self.account_token(item.account_id.as_deref().unwrap_or_default())?;
+        let normalize = |d: Option<String>| d.map(|d| d.chars().take(10).collect::<String>());
+        let (start, due) = (normalize(start), normalize(due));
+        for (value, field, label) in [(&start, &dates.start_field, "start"), (&due, &dates.due_field, "due")] {
+            let Some(value) = value else { continue };
+            let field = field
+                .as_deref()
+                .ok_or_else(|| Error::msg(format!("this project has no {label} date field")))?;
+            let date = Some(value.as_str()).filter(|v| !v.is_empty());
+            self.gh.set_project_date(&account.host, &token, &dates, field, date).await?;
+        }
+        let apply = |i: &mut Item| {
+            if let Some(s) = &start {
+                i.start = Some(s.clone()).filter(|s| !s.is_empty());
+            }
+            if let Some(d) = &due {
+                i.due = Some(d.clone()).filter(|d| !d.is_empty());
+            }
+        };
+        let mut updated = item.clone();
+        apply(&mut updated);
+        self.ensure_cached(&updated)?;
+        self.update_cached(id, apply)?;
+        Ok(updated)
+    }
+
     /// Undoes creating an item. A reminder is deleted; a GitHub issue is closed
     /// as "not planned" (deleting issues needs admin rights).
     pub async fn discard_item(&self, id: &str) -> Result<()> {
@@ -811,8 +857,15 @@ fn merge_copies(rows: Vec<(String, Item)>) -> Vec<Item> {
                     }
                 }
                 base.status = base.status.or(other.status);
-                // Only the project copy may carry a project date.
-                base.due = base.due.or(other.due);
+                // The project copy's dates win: they're the ones the Gantt chart edits.
+                if other.project_dates.is_some() {
+                    base.start = other.start.or(base.start);
+                    base.due = other.due.or(base.due);
+                    base.project_dates = other.project_dates;
+                } else {
+                    base.start = base.start.or(other.start);
+                    base.due = base.due.or(other.due);
+                }
                 base.completed |= other.completed;
                 *existing = base;
             }
@@ -840,6 +893,8 @@ fn placeholder() -> Item {
         status: None,
         project_ids: vec![],
         updated_at: None,
+        start: None,
+        project_dates: None,
         parent_id: None,
         sub_issues: None,
         categories: vec![],
@@ -926,6 +981,25 @@ mod tests {
         assert_eq!(out[0].title, "v2026-01-03");
         assert_eq!(out[0].project_ids, vec!["P2", "P1"]);
         assert_eq!(out[0].status.as_deref(), Some("In progress"));
+    }
+
+    #[test]
+    fn merge_prefers_the_project_copys_dates() {
+        let mut repo = issue("2026-01-02", None, None);
+        repo.due = Some("2026-03-01".into()); // milestone
+        let mut proj = issue("2026-01-01", Some("P1"), None);
+        proj.start = Some("2026-02-01".into());
+        proj.due = Some("2026-02-10".into());
+        proj.project_dates = Some(ProjectDates {
+            project_id: "P1".into(),
+            item_id: "PVTI".into(),
+            start_field: Some("S".into()),
+            due_field: Some("D".into()),
+        });
+        let out = merge_copies(vec![("R1".into(), repo), ("P1".into(), proj)]);
+        assert_eq!(out[0].start.as_deref(), Some("2026-02-01"));
+        assert_eq!(out[0].due.as_deref(), Some("2026-02-10"));
+        assert!(out[0].project_dates.is_some());
     }
 
     #[test]

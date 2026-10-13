@@ -54,6 +54,7 @@ pub fn run() {
             commands::create_item,
             commands::set_completed,
             commands::discard_item,
+            commands::set_dates,
             commands::set_category,
             commands::item_details,
             commands::update_item,

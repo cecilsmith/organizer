@@ -71,11 +71,22 @@ export interface Item {
   status: string | null;
   projectIds: string[];
   updatedAt: string | null;
+  /** Start date (`YYYY-MM-DD`), from a GitHub Project start field or iteration. */
+  start: string | null;
+  /** Where the dates live in a GitHub Project; null when they can't be edited here. */
+  projectDates: ProjectDates | null;
   /** GitHub sub-issues: the parent issue's item id. */
   parentId: string | null;
   /** GitHub sub-issues: progress of this issue's own sub-issues. */
   subIssues: { total: number; completed: number } | null;
   categories: string[];
+}
+
+export interface ProjectDates {
+  projectId: string;
+  itemId: string;
+  startField: string | null;
+  dueField: string | null;
 }
 
 export interface SourceStatus {
@@ -176,6 +187,9 @@ export const api = {
   /** `fallback` lets undo work after a sync has dropped the item from the cache. */
   setCompleted: (id: string, completed: boolean, fallback?: Item) =>
     invoke<void>("set_completed", { id, completed, fallback: fallback ?? null }),
+  /** Moves/resizes an item's dates. `null` leaves a date alone; `""` clears it. */
+  setDates: (id: string, start: string | null, due: string | null, fallback?: Item) =>
+    invoke<Item>("set_dates", { id, start, due, fallback: fallback ?? null }),
   /** Undoes creating an item: deletes a reminder, or closes an issue as not planned. */
   discardItem: (id: string) => invoke<void>("discard_item", { id }),
   setCategory: (id: string, category: string | null) => invoke<void>("set_category", { id, category }),

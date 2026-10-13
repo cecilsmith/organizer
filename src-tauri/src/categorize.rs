@@ -129,6 +129,8 @@ mod tests {
             status: None,
             project_ids: vec![],
             updated_at: None,
+            start: None,
+            project_dates: None,
             parent_id: None,
             sub_issues: None,
             categories: vec![],

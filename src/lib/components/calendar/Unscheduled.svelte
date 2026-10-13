@@ -34,7 +34,7 @@
     <span>No date</span>
     <span class="faint">{items.length}</span>
   </header>
-  <p class="faint hint">Drag reminders onto the calendar to schedule them.</p>
+  <p class="faint hint">Drag items onto the calendar to schedule them.</p>
   <div class="list">
     {#each reminders as item (item.id)}
       <CalendarChip {item} />

@@ -115,6 +115,17 @@ pub async fn set_completed(app: S<'_>, id: String, completed: bool, fallback: Op
 }
 
 #[tauri::command]
+pub async fn set_dates(
+    app: S<'_>,
+    id: String,
+    start: Option<String>,
+    due: Option<String>,
+    fallback: Option<Item>,
+) -> Result<Item> {
+    app.set_dates(&id, start, due, fallback).await
+}
+
+#[tauri::command]
 pub async fn discard_item(app: S<'_>, id: String) -> Result<()> {
     app.discard_item(&id).await
 }

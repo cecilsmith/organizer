@@ -12,6 +12,9 @@ const categories: Category[] = [
   { id: "fun", name: "Fun", color: "#27ae60", label: "fun", position: 3 },
 ];
 
+/** Project date fields for sample items in "Q4 Roadmap". */
+const pd = (n: string) => ({ projectId: "P1", itemId: `PVTI_${n}`, startField: "F_start", dueField: "F_target" });
+
 function item(p: Partial<Item> & Pick<Item, "id" | "title" | "kind">): Item {
   return {
     containerId: "",
@@ -28,6 +31,8 @@ function item(p: Partial<Item> & Pick<Item, "id" | "title" | "kind">): Item {
     status: null,
     projectIds: [],
     updatedAt: new Date().toISOString(),
+    start: null,
+    projectDates: null,
     parentId: null,
     subIssues: null,
     categories: [],
@@ -64,11 +69,12 @@ const snap: Snapshot = {
     item({ id: "rem:8", kind: "reminder", title: "Pay rent", containerId: "L1", containerName: "Errands", due: day(18), priority: 1, categories: ["personal"] }),
     item({ id: "rem:9", kind: "reminder", title: "Concert tickets on sale", containerId: "L3", containerName: "Someday", due: `${day(4)}T12:00`, categories: ["fun"] }),
     item({ id: "gh:I1", kind: "issue", title: "Write related-work section", containerId: "R1", containerName: "octo/thesis", number: 12, accountId: "octo@github.com", labels: [{ name: "writing", color: "0e8a16" }], due: day(3), categories: ["school"] }),
-    item({ id: "gh:I2", kind: "issue", title: "Checkout fails on Safari 18", containerId: "R2", containerName: "acme/storefront", number: 231, accountId: "octo@github.com", labels: [{ name: "bug", color: "d73a4a" }, { name: "business", color: "f2994a" }], status: "In progress", projectIds: ["P1"], assignees: ["octo"], subIssues: { total: 3, completed: 1 }, categories: ["business"] }),
-    item({ id: "gh:I3", kind: "issue", title: "Reproduce on iOS Safari", containerId: "R2", containerName: "acme/storefront", number: 232, accountId: "octo@github.com", parentId: "gh:I2", categories: ["business"] }),
-    item({ id: "gh:I4", kind: "issue", title: "Fix payment form validation", containerId: "R2", containerName: "acme/storefront", number: 233, accountId: "octo@github.com", parentId: "gh:I2", due: day(2), labels: [{ name: "bug", color: "d73a4a" }], categories: ["business"] }),
-    item({ id: "gh:PR1", kind: "pullRequest", title: "Add Apple Pay", containerId: "R2", containerName: "acme/storefront", number: 240, accountId: "octo@github.com", status: "In review", projectIds: ["P1"], categories: ["business"] }),
-    item({ id: "ghpi:D1", kind: "draftIssue", title: "Plan holiday sale", containerId: "P1", containerName: "Q4 Roadmap", accountId: "octo@github.com", status: "Todo", categories: ["business"] }),
+    item({ id: "gh:I2", kind: "issue", title: "Checkout fails on Safari 18", containerId: "R2", containerName: "acme/storefront", number: 231, accountId: "octo@github.com", labels: [{ name: "bug", color: "d73a4a" }, { name: "business", color: "f2994a" }], status: "In progress", projectIds: ["P1"], assignees: ["octo"], subIssues: { total: 3, completed: 1 }, start: day(-5), due: day(9), projectDates: pd("I2"), categories: ["business"] }),
+    item({ id: "gh:I3", kind: "issue", title: "Reproduce on iOS Safari", containerId: "R2", containerName: "acme/storefront", number: 232, accountId: "octo@github.com", parentId: "gh:I2", projectIds: ["P1"], start: day(-3), due: day(1), projectDates: pd("I3"), categories: ["business"] }),
+    item({ id: "gh:I4", kind: "issue", title: "Fix payment form validation", containerId: "R2", containerName: "acme/storefront", number: 233, accountId: "octo@github.com", parentId: "gh:I2", projectIds: ["P1"], start: day(2), due: day(8), projectDates: pd("I4"), labels: [{ name: "bug", color: "d73a4a" }], categories: ["business"] }),
+    item({ id: "gh:PR1", kind: "pullRequest", title: "Add Apple Pay", containerId: "R2", containerName: "acme/storefront", number: 240, accountId: "octo@github.com", status: "In review", projectIds: ["P1"], start: day(-2), due: day(3), projectDates: pd("PR1"), categories: ["business"] }),
+    item({ id: "gh:I5", kind: "issue", title: "Search revamp", containerId: "R2", containerName: "acme/storefront", number: 250, accountId: "octo@github.com", status: "Todo", projectIds: ["P1"], start: day(14), due: day(27), categories: ["business"] }),
+    item({ id: "ghpi:D1", kind: "draftIssue", title: "Plan holiday sale", containerId: "P1", containerName: "Q4 Roadmap", accountId: "octo@github.com", status: "Todo", start: day(10), due: day(24), projectDates: pd("D1"), categories: ["business"] }),
   ],
   sources: [
     { sourceId: "reminders", label: "Apple Reminders", lastSynced: new Date().toISOString(), error: null, syncing: false },
@@ -89,6 +95,13 @@ export function installMock() {
           const it = snap.items.find((i) => i.id === a.id);
           if (it) it.completed = a.completed as boolean;
           return null;
+        }
+        case "set_dates": {
+          const it = snap.items.find((i) => i.id === a.id);
+          if (!it) throw "item not found";
+          if (typeof a.start === "string") it.start = a.start || null;
+          if (typeof a.due === "string") it.due = a.due || null;
+          return structuredClone(it);
         }
         case "discard_item": {
           snap.items = snap.items.filter((i) => i.id !== a.id);

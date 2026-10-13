@@ -113,6 +113,12 @@ pub struct Item {
     /// Projects (node ids) that contain this item.
     pub project_ids: Vec<String>,
     pub updated_at: Option<String>,
+    /// Start date (`YYYY-MM-DD`), from a GitHub Project start field or iteration.
+    #[serde(default)]
+    pub start: Option<String>,
+    /// Where this item's dates live in a GitHub Project, so the Gantt chart can edit them.
+    #[serde(default)]
+    pub project_dates: Option<ProjectDates>,
     /// GitHub sub-issues: the parent issue's item id (`gh:<node id>`).
     #[serde(default)]
     pub parent_id: Option<String>,
@@ -130,6 +136,18 @@ impl Item {
         let (owner, name) = self.container_name.split_once('/')?;
         Some((owner, name, self.number?))
     }
+}
+
+/// The project item and date fields behind an item's start/due dates.
+/// A missing field id means the project has no such field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDates {
+    pub project_id: String,
+    /// The ProjectV2 item id (`PVTI_…`), not the issue id.
+    pub item_id: String,
+    pub start_field: Option<String>,
+    pub due_field: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]

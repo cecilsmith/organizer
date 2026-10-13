@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::error::{Error, Result};
-use crate::model::{Account, Candidate, Item, ItemKind, Label, Project, Repo, SubIssues};
+use crate::model::{Account, Candidate, Item, ItemKind, Label, Project, ProjectDates, Repo, SubIssues};
 
 /// Bodies are only used for search and previews; cap them to keep the cache lean.
 const MAX_BODY: usize = 4000;
@@ -328,13 +328,15 @@ impl GitHub {
     pub async fn project_items(&self, host: &str, token: &str, project: &Project) -> Result<Vec<Item>> {
         let query = format!(
             r#"query($id: ID!, $after: String) {{ node(id: $id) {{ ... on ProjectV2 {{
+                fields(first: 50) {{ nodes {{ ... on ProjectV2Field {{ id name dataType }} }} }}
                 items(first: 100, after: $after) {{
                   pageInfo {{ hasNextPage endCursor }}
                   nodes {{
                     id isArchived
                     status: fieldValueByName(name: "Status") {{ ... on ProjectV2ItemFieldSingleSelectValue {{ name }} }}
                     fieldValues(first: 20) {{ nodes {{
-                      ... on ProjectV2ItemFieldDateValue {{ date field {{ ... on ProjectV2FieldCommon {{ name }} }} }}
+                      ... on ProjectV2ItemFieldDateValue {{ date field {{ ... on ProjectV2FieldCommon {{ id }} }} }}
+                      ... on ProjectV2ItemFieldIterationValue {{ startDate duration }}
                     }} }}
                     content {{
                       __typename
@@ -345,8 +347,12 @@ impl GitHub {
         );
         let mut items = Vec::new();
         let mut after = Value::Null;
-        for _ in 0..MAX_PAGES {
+        let mut fields = DateFields::default();
+        for page in 0..MAX_PAGES {
             let data = self.graphql(host, token, &query, json!({ "id": project.id, "after": after })).await?;
+            if page == 0 {
+                fields = DateFields::pick(&data["node"]["fields"]["nodes"]);
+            }
             let conn = &data["node"]["items"];
             if conn.is_null() {
                 return Err(Error::GitHub(format!("project \"{}\" is not accessible", project.title)));
@@ -377,6 +383,8 @@ impl GitHub {
                         status: None,
                         project_ids: vec![],
                         updated_at: content["updatedAt"].as_str().map(Into::into),
+                        start: None,
+                        project_dates: None,
                         parent_id: None,
                         sub_issues: None,
                         categories: vec![],
@@ -388,10 +396,7 @@ impl GitHub {
                     }
                 };
                 item.status = node["status"]["name"].as_str().map(Into::into);
-                // A milestone due date wins; otherwise use the project's date field.
-                if item.due.is_none() {
-                    item.due = project_due_date(&node["fieldValues"]["nodes"]);
-                }
+                fields.apply(&mut item, &node["fieldValues"]["nodes"], &project.id, node["id"].as_str().unwrap_or_default());
                 item.project_ids = vec![project.id.clone()];
                 items.push(item);
             }
@@ -444,6 +449,8 @@ impl GitHub {
             status: None,
             project_ids: vec![],
             updated_at: Some(rest.updated_at),
+            start: None,
+            project_dates: None,
             parent_id: None,
             sub_issues: None,
             categories: vec![],
@@ -469,6 +476,25 @@ impl GitHub {
             json!({ "p": project_id, "i": item_id }),
         )
         .await?;
+        Ok(())
+    }
+
+    /// Sets (`Some`) or clears (`None`) a project item's date field.
+    pub async fn set_project_date(
+        &self,
+        host: &str,
+        token: &str,
+        dates: &ProjectDates,
+        field_id: &str,
+        date: Option<&str>,
+    ) -> Result<()> {
+        let vars = json!({ "p": dates.project_id, "i": dates.item_id, "f": field_id, "d": date });
+        let query = if date.is_some() {
+            "mutation($p: ID!, $i: ID!, $f: ID!, $d: Date!) { updateProjectV2ItemFieldValue(input: { projectId: $p, itemId: $i, fieldId: $f, value: { date: $d } }) { projectV2Item { id } } }"
+        } else {
+            "mutation($p: ID!, $i: ID!, $f: ID!) { clearProjectV2ItemFieldValue(input: { projectId: $p, itemId: $i, fieldId: $f }) { projectV2Item { id } } }"
+        };
+        self.graphql(host, token, query, vars).await?;
         Ok(())
     }
 
@@ -692,32 +718,90 @@ fn logins(conn: &Value) -> Vec<String> {
     conn["nodes"].as_array().into_iter().flatten().filter_map(|n| n["login"].as_str().map(Into::into)).collect()
 }
 
-/// Picks the project date field that means "when it's due": one named like
-/// due/deadline/target/end/date, skipping start dates.
-fn project_due_date(values: &Value) -> Option<String> {
-    let dates: Vec<(String, String)> = values
-        .as_array()?
-        .iter()
-        .filter_map(|v| Some((v["field"]["name"].as_str()?.to_lowercase(), v["date"].as_str()?.to_string())))
-        .collect();
-    let rank = |name: &str| {
-        if name.contains("start") || name.contains("begin") {
-            None
-        } else if ["due", "deadline"].iter().any(|k| name.contains(k)) {
-            Some(0)
-        } else if ["target", "end", "finish"].iter().any(|k| name.contains(k)) {
-            Some(1)
-        } else if name.contains("date") {
-            Some(2)
-        } else {
-            None
+/// The date fields a project schedules with, chosen by name: a start field
+/// ("Start date", "Begin") and a due field ("Due", "Deadline", "Target date",
+/// "End date"…).
+#[derive(Default)]
+struct DateFields {
+    start: Option<String>,
+    due: Option<String>,
+}
+
+impl DateFields {
+    fn pick(fields: &Value) -> Self {
+        let dates = fields
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|f| f["dataType"] == "DATE")
+            .filter_map(|f| Some((f["id"].as_str()?.to_string(), f["name"].as_str()?.to_lowercase())));
+        let mut start = None;
+        let mut due: Option<(u8, String)> = None;
+        for (id, name) in dates {
+            if name.contains("start") || name.contains("begin") {
+                start.get_or_insert(id);
+                continue;
+            }
+            let rank = if ["due", "deadline"].iter().any(|k| name.contains(k)) {
+                0
+            } else if ["target", "end", "finish"].iter().any(|k| name.contains(k)) {
+                1
+            } else if name.contains("date") {
+                2
+            } else {
+                continue;
+            };
+            if due.as_ref().is_none_or(|(r, _)| rank < *r) {
+                due = Some((rank, id));
+            }
         }
-    };
-    dates
-        .iter()
-        .filter_map(|(name, date)| Some((rank(name)?, date)))
-        .min_by_key(|(r, _)| *r)
-        .map(|(_, d)| d.chars().take(10).collect())
+        Self { start, due: due.map(|(_, id)| id) }
+    }
+
+    /// Sets the item's start/due from this project's fields. A project due
+    /// date beats a milestone, since it's the one the Gantt chart edits. With
+    /// no date values at all, an iteration (sprint) supplies both ends.
+    fn apply(&self, item: &mut Item, values: &Value, project_id: &str, project_item_id: &str) {
+        let values = values.as_array().map(Vec::as_slice).unwrap_or_default();
+        let date_of = |field: &Option<String>| -> Option<String> {
+            let field = field.as_ref()?;
+            values
+                .iter()
+                .find(|v| v["field"]["id"].as_str() == Some(field))
+                .and_then(|v| v["date"].as_str())
+                .map(|d| d.chars().take(10).collect())
+        };
+        let start = date_of(&self.start);
+        let due = date_of(&self.due);
+        if start.is_none() && due.is_none() {
+            if let Some((s, e)) = values.iter().find_map(iteration_span) {
+                item.start = Some(s);
+                item.due = item.due.take().or(Some(e));
+            }
+        } else {
+            item.start = start;
+            if due.is_some() {
+                item.due = due;
+            }
+        }
+        if self.start.is_some() || self.due.is_some() {
+            item.project_dates = Some(ProjectDates {
+                project_id: project_id.into(),
+                item_id: project_item_id.into(),
+                start_field: self.start.clone(),
+                due_field: self.due.clone(),
+            });
+        }
+    }
+}
+
+/// `(first day, last day)` of an iteration field value.
+fn iteration_span(v: &Value) -> Option<(String, String)> {
+    let start = v["startDate"].as_str()?;
+    let days = v["duration"].as_i64()?.max(1);
+    let first = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d").ok()?;
+    let last = first + chrono::Duration::days(days - 1);
+    Some((first.to_string(), last.to_string()))
 }
 
 fn repo_candidate(n: &Value) -> Option<Candidate> {
@@ -773,6 +857,8 @@ fn content_item(n: &Value, account_id: &str) -> Option<Item> {
         status: None,
         project_ids: vec![],
         updated_at: n["updatedAt"].as_str().map(Into::into),
+        start: None,
+        project_dates: None,
         parent_id: n["parent"]["id"].as_str().map(|id| format!("gh:{id}")),
         sub_issues: n["subIssuesSummary"]["total"]
             .as_i64()
@@ -830,18 +916,51 @@ mod tests {
         assert!(content_item(&json!({ "__typename": "DraftIssue", "id": "x" }), "a").is_none());
     }
 
+    fn blank_item() -> Item {
+        content_item(&json!({ "__typename": "Issue", "id": "I_1" }), "a").unwrap()
+    }
+
     #[test]
-    fn picks_due_like_project_date_fields() {
-        let values = json!([
-            { "date": "2026-10-01", "field": { "name": "Start date" } },
-            { "date": "2026-10-20", "field": { "name": "Target date" } },
-            {},
-            { "date": "2026-10-15", "field": { "name": "Due" } }
+    fn picks_start_and_due_fields_by_name() {
+        let fields = json!([
+            { "id": "F_status", "name": "Status", "dataType": "SINGLE_SELECT" },
+            { "id": "F_target", "name": "Target date", "dataType": "DATE" },
+            { "id": "F_start", "name": "Start date", "dataType": "DATE" },
+            { "id": "F_due", "name": "Due", "dataType": "DATE" },
+            {}
         ]);
-        assert_eq!(project_due_date(&values).as_deref(), Some("2026-10-15"));
-        let only_start = json!([{ "date": "2026-10-01", "field": { "name": "Start" } }]);
-        assert_eq!(project_due_date(&only_start), None);
-        assert_eq!(project_due_date(&json!([])), None);
+        let f = DateFields::pick(&fields);
+        assert_eq!(f.start.as_deref(), Some("F_start"));
+        assert_eq!(f.due.as_deref(), Some("F_due"));
+        let none = DateFields::pick(&json!([{ "id": "F", "name": "Start", "dataType": "DATE" }]));
+        assert!(none.due.is_none());
+    }
+
+    #[test]
+    fn applies_project_dates_over_milestones() {
+        let fields = DateFields { start: Some("F_s".into()), due: Some("F_d".into()) };
+        let mut it = blank_item();
+        it.due = Some("2026-12-01".into()); // milestone
+        let values = json!([
+            { "date": "2026-10-01", "field": { "id": "F_s" } },
+            { "date": "2026-10-20", "field": { "id": "F_d" } }
+        ]);
+        fields.apply(&mut it, &values, "P", "PVTI_1");
+        assert_eq!(it.start.as_deref(), Some("2026-10-01"));
+        assert_eq!(it.due.as_deref(), Some("2026-10-20"));
+        let dates = it.project_dates.unwrap();
+        assert_eq!((dates.item_id.as_str(), dates.due_field.as_deref()), ("PVTI_1", Some("F_d")));
+    }
+
+    #[test]
+    fn falls_back_to_iterations_without_date_values() {
+        let mut it = blank_item();
+        let values = json!([{ "startDate": "2026-10-05", "duration": 14 }]);
+        DateFields::default().apply(&mut it, &values, "P", "PVTI_1");
+        assert_eq!(it.start.as_deref(), Some("2026-10-05"));
+        assert_eq!(it.due.as_deref(), Some("2026-10-18"));
+        // No date fields to write back to.
+        assert!(it.project_dates.is_none());
     }
 
     #[test]

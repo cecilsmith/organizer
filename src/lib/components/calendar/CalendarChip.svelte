@@ -19,7 +19,7 @@
   const color = $derived(store.categories.find((c) => item.categories.includes(c.id))?.color ?? "var(--text-3)");
   const minutes = $derived(item.due ? dueMinutes(item.due) : null);
   const overdue = $derived(!item.completed && dueBucket(item.due) === "overdue");
-  const draggable = $derived(item.kind === "reminder" && !item.completed);
+  const draggable = $derived(store.canReschedule(item));
   const kindIcon = $derived(
     item.kind === "pullRequest" ? "pr" : item.kind === "draftIssue" ? "draft" : item.kind === "issue" ? "issue" : null,
   );
@@ -50,7 +50,7 @@
     e.stopPropagation();
     store.edit(item);
   }}
-  title="{minutes !== null ? `${formatTime(minutes)} · ` : ''}{item.title}{item.containerName ? ` — ${item.containerName}` : ''}{item.kind !== 'reminder' ? '\n(GitHub dates are set on GitHub)' : ''}"
+  title="{minutes !== null ? `${formatTime(minutes)} · ` : ''}{item.title}{item.containerName ? ` — ${item.containerName}` : ''}{draggable ? '' : '\n(This date comes from a milestone or iteration on GitHub)'}"
 >
   {#if item.kind !== "pullRequest"}
     <button

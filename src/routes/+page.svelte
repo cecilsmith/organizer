@@ -6,12 +6,14 @@
   import ItemRow from "$lib/components/ItemRow.svelte";
   import EditPanel from "$lib/components/EditPanel.svelte";
   import Calendar from "$lib/components/calendar/Calendar.svelte";
+  import Gantt from "$lib/components/gantt/Gantt.svelte";
   import QuickAdd from "$lib/components/QuickAdd.svelte";
   import Settings from "$lib/components/Settings.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
 
   let addInput = $state<HTMLInputElement>();
   let searchInput = $state<HTMLInputElement>();
+  let gantt = $state<{ scrollToToday: (smooth?: boolean) => void }>();
 
   onMount(async () => {
     if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window)) {
@@ -188,10 +190,11 @@
     }
     if (typing || store.settingsOpen) return;
     if (e.key === "v") {
-      store.setView(store.view === "list" ? "calendar" : "list");
+      store.nextView();
       return;
     }
     if (store.view === "calendar" && calendarKey(e)) return;
+    if (store.view === "gantt" && ganttKey(e)) return;
     const selected = flat.find((it) => it.id === store.selectedId);
     switch (e.key) {
       case "ArrowDown":
@@ -275,6 +278,18 @@
     return true;
   }
 
+  /** Gantt keys: T scrolls to today, plus actions on the selected item. */
+  function ganttKey(e: KeyboardEvent): boolean {
+    if (e.key === "t") {
+      gantt?.scrollToToday();
+      e.preventDefault();
+      return true;
+    }
+    // Arrow keys scroll the chart; item actions work like the calendar's.
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "h" || e.key === "l") return false;
+    return calendarKey(e);
+  }
+
   function setSource(s: SourceFilter) {
     store.sourceFilter = s;
     store.savePrefs();
@@ -324,6 +339,7 @@
       <div class="seg view" role="group" aria-label="View">
         <button class:on={store.view === "list"} onclick={() => store.setView("list")} title="List (V)"><Icon name="list" size={14} /> List</button>
         <button class:on={store.view === "calendar"} onclick={() => store.setView("calendar")} title="Calendar (V)"><Icon name="calendar" size={14} /> Calendar</button>
+        <button class:on={store.view === "gantt"} onclick={() => store.setView("gantt")} title="Gantt chart (V)"><Icon name="gantt" size={14} /> Gantt</button>
       </div>
     </header>
 
@@ -331,6 +347,8 @@
 
     {#if store.view === "calendar" && connected}
       <Calendar />
+    {:else if store.view === "gantt" && connected}
+      <Gantt bind:this={gantt} />
     {:else}
     <div class="scroll" role="listbox" aria-label="To-dos">
       {#if store.snap && !connected}
