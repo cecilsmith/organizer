@@ -3,6 +3,8 @@ import { api, errorText, type Item, type Snapshot } from "./api";
 
 export type SourceFilter = "all" | "reminders" | "github";
 export type GroupBy = "source" | "due";
+/** Whether reminder notes show under every row, or only the selected one. */
+export type ShowNotes = "always" | "selected";
 
 export interface Toast {
   id: number;
@@ -17,7 +19,7 @@ const FOCUS_SYNC_AFTER_MS = 30_000;
 
 const PREFS_KEY = "organizer.prefs";
 
-function loadPrefs(): Partial<{ tab: string; groupBy: GroupBy; sourceFilter: SourceFilter }> {
+function loadPrefs(): Partial<{ tab: string; groupBy: GroupBy; sourceFilter: SourceFilter; showNotes: ShowNotes }> {
   try {
     return JSON.parse(localStorage.getItem(PREFS_KEY) ?? "{}");
   } catch {
@@ -31,6 +33,7 @@ class Store {
   query = $state("");
   sourceFilter = $state<SourceFilter>("all");
   groupBy = $state<GroupBy>("source");
+  showNotes = $state<ShowNotes>("selected");
   settingsOpen = $state(false);
   settingsSection = $state<string>("accounts");
   toasts = $state<Toast[]>([]);
@@ -54,6 +57,7 @@ class Store {
     const p = loadPrefs();
     if (p.tab) this.tab = p.tab;
     if (p.groupBy) this.groupBy = p.groupBy;
+    if (p.showNotes) this.showNotes = p.showNotes;
     if (p.sourceFilter) this.sourceFilter = p.sourceFilter;
   }
 
@@ -61,7 +65,12 @@ class Store {
     try {
       localStorage.setItem(
         PREFS_KEY,
-        JSON.stringify({ tab: this.tab, groupBy: this.groupBy, sourceFilter: this.sourceFilter }),
+        JSON.stringify({
+          tab: this.tab,
+          groupBy: this.groupBy,
+          sourceFilter: this.sourceFilter,
+          showNotes: this.showNotes,
+        }),
       );
     } catch {
       /* storage unavailable; prefs are a convenience */

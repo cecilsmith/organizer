@@ -113,6 +113,12 @@ pub struct Item {
     /// Projects (node ids) that contain this item.
     pub project_ids: Vec<String>,
     pub updated_at: Option<String>,
+    /// GitHub sub-issues: the parent issue's item id (`gh:<node id>`).
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// GitHub sub-issues: progress of this issue's own sub-issues.
+    #[serde(default)]
+    pub sub_issues: Option<SubIssues>,
     /// Resolved at read time from labels, hashtags and source defaults.
     #[serde(default)]
     pub categories: Vec<String>,
@@ -124,6 +130,13 @@ impl Item {
         let (owner, name) = self.container_name.split_once('/')?;
         Some((owner, name, self.number?))
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubIssues {
+    pub total: i64,
+    pub completed: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::error::{Error, Result};
-use crate::model::{Account, Candidate, Item, ItemKind, Label, Project, Repo};
+use crate::model::{Account, Candidate, Item, ItemKind, Label, Project, Repo, SubIssues};
 
 /// Bodies are only used for search and previews; cap them to keep the cache lean.
 const MAX_BODY: usize = 4000;
@@ -42,6 +42,8 @@ fragment IssueFields on Issue {
   labels(first: 20) { nodes { name color } }
   assignees(first: 10) { nodes { login } }
   milestone { dueOn }
+  parent { id }
+  subIssuesSummary { total completed }
 }
 "#;
 
@@ -372,6 +374,8 @@ impl GitHub {
                         status: None,
                         project_ids: vec![],
                         updated_at: content["updatedAt"].as_str().map(Into::into),
+                        parent_id: None,
+                        sub_issues: None,
                         categories: vec![],
                     }
                 } else {
@@ -433,6 +437,8 @@ impl GitHub {
             status: None,
             project_ids: vec![],
             updated_at: Some(rest.updated_at),
+            parent_id: None,
+            sub_issues: None,
             categories: vec![],
         })
     }
@@ -706,6 +712,11 @@ fn content_item(n: &Value, account_id: &str) -> Option<Item> {
         status: None,
         project_ids: vec![],
         updated_at: n["updatedAt"].as_str().map(Into::into),
+        parent_id: n["parent"]["id"].as_str().map(|id| format!("gh:{id}")),
+        sub_issues: n["subIssuesSummary"]["total"]
+            .as_i64()
+            .filter(|&t| t > 0)
+            .map(|total| SubIssues { total, completed: n["subIssuesSummary"]["completed"].as_i64().unwrap_or(0) }),
         categories: vec![],
     })
 }
@@ -734,7 +745,9 @@ mod tests {
             "repository": { "id": "R_1", "nameWithOwner": "o/r" },
             "labels": { "nodes": [{ "name": "school", "color": "ff0000" }] },
             "assignees": { "nodes": [{ "login": "me" }] },
-            "milestone": { "dueOn": "2026-11-01T07:00:00Z" }
+            "milestone": { "dueOn": "2026-11-01T07:00:00Z" },
+            "parent": { "id": "I_0" },
+            "subIssuesSummary": { "total": 3, "completed": 1 }
         });
         let it = content_item(&issue, "me@github.com").unwrap();
         assert_eq!(it.id, "gh:I_1");
@@ -744,6 +757,8 @@ mod tests {
         assert_eq!(it.labels[0].name, "school");
         assert_eq!(it.repo_and_number(), Some(("o", "r", 7)));
         assert!(!it.completed);
+        assert_eq!(it.parent_id.as_deref(), Some("gh:I_0"));
+        assert_eq!(it.sub_issues, Some(SubIssues { total: 3, completed: 1 }));
 
         let pr = json!({ "__typename": "PullRequest", "id": "PR_1", "state": "MERGED",
                          "repository": { "id": "R_1", "nameWithOwner": "o/r" } });

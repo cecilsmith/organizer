@@ -71,6 +71,10 @@ export interface Item {
   status: string | null;
   projectIds: string[];
   updatedAt: string | null;
+  /** GitHub sub-issues: the parent issue's item id. */
+  parentId: string | null;
+  /** GitHub sub-issues: progress of this issue's own sub-issues. */
+  subIssues: { total: number; completed: number } | null;
   categories: string[];
 }
 

@@ -29,10 +29,11 @@
   .dot {
     position: absolute;
     left: 9px;
+    z-index: 1;
     pointer-events: none;
   }
-  select {
-    padding-left: 24px;
+  select.field {
+    padding-left: 25px;
     height: 26px;
     min-width: 130px;
   }

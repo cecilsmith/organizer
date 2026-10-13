@@ -4,6 +4,7 @@
   import { store, todayStr } from "$lib/store.svelte";
   import CategorySelect from "./CategorySelect.svelte";
   import Icon from "./Icon.svelte";
+  import { hashtags, stripTags } from "$lib/tags";
 
   let { item }: { item: Item } = $props();
 
@@ -131,23 +132,8 @@
 
   // ---- helpers ----------------------------------------------------------------
 
-  function hashtags(text: string): string[] {
-    return [...text.matchAll(/(?:^|\s)#([\p{L}\p{N}_:-]+)/gu)].map((m) => m[1].toLowerCase());
-  }
-
   function stripCategoryTags(text: string): string {
-    return text
-      .split("\n")
-      .map((line) =>
-        line
-          .replace(/(^|\s)#([\p{L}\p{N}_:-]+)/gu, (m, pre: string, tag: string) =>
-            tagToCategory.has(tag.toLowerCase()) ? pre : m,
-          )
-          .replace(/\s{2,}/g, " ")
-          .trimEnd(),
-      )
-      .join("\n")
-      .trim();
+    return stripTags(text, (t) => tagToCategory.has(t));
   }
 
   function sameSet(a: string[], b: string[]) {

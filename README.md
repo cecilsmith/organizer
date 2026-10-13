@@ -62,6 +62,7 @@ Open **Settings** (⌘,).
 
 3. **Repositories / Projects:** browse or paste `owner/repo` (or a project URL), and pick a default area.
 4. **Areas:** rename areas, recolor them, change their labels, or add new ones.
+5. **Display:** choose whether reminder notes show under every reminder (first two lines) or only for the one you've selected.
 
 ## Keyboard
 

@@ -11,6 +11,7 @@
     { id: "projects", name: "Projects", icon: "stack" },
     { id: "reminders", name: "Apple Reminders", icon: "list" },
     { id: "categories", name: "Areas", icon: "tag" },
+    { id: "display", name: "Display", icon: "eye" },
     { id: "status", name: "Sync status", icon: "sync" },
   ];
 
@@ -260,6 +261,32 @@
             <button class="icon-btn" title="Add area" onclick={addCategory} disabled={!draft.name.trim()}><Icon name="plus" /></button>
           </div>
         </div>
+      {:else if store.settingsSection === "display"}
+        <h3>Display</h3>
+        <h4>Reminder notes in the list</h4>
+        <div class="choices">
+          {#each [["selected", "Only for the selected reminder", "Click a reminder to see its notes; click again to hide them."], ["always", "Under every reminder", "Show the first two lines of notes for every reminder."]] as [value, title, desc] (value)}
+            <label class="choice" class:on={store.showNotes === value}>
+              <input
+                type="radio"
+                name="show-notes"
+                checked={store.showNotes === value}
+                onchange={() => {
+                  store.showNotes = value as typeof store.showNotes;
+                  store.savePrefs();
+                }}
+              />
+              <span>
+                <strong>{title}</strong>
+                <span class="muted">{desc}</span>
+              </span>
+            </label>
+          {/each}
+        </div>
+        <p class="faint small-note">
+          The selected item always shows its notes in full. Previews leave out area hashtags like <code>#school</code>,
+          since the area already shows on the row. GitHub descriptions only open for the selected item.
+        </p>
       {:else if store.settingsSection === "status"}
         <h3>Sync status</h3>
         <p class="muted">GitHub refreshes every 2 minutes and whenever you come back to the window. Reminders update live.</p>
@@ -449,6 +476,35 @@
     padding: 0;
     border: none;
     background: none;
+  }
+  .choices {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .choice {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .choice.on {
+    border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+  .choice input {
+    margin-top: 2px;
+  }
+  .choice span {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .small-note {
+    margin-top: 12px;
+    font-size: 12px;
   }
   .icon-btn.armed {
     background: var(--danger);

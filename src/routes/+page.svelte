@@ -38,6 +38,54 @@
     icon: string;
     color?: string | null;
     items: Item[];
+    /** `items` in display order, with sub-issues placed under their parents. */
+    rows: Row[];
+  }
+
+  interface Row {
+    item: Item;
+    depth: number;
+    /** The parent's title when the parent isn't shown directly above. */
+    parentTitle: string | null;
+  }
+
+  const byId = $derived(new Map(store.items.map((it) => [it.id, it])));
+
+  /**
+   * Nests sub-issues under their parent when both are in the same group.
+   * Children whose parent is elsewhere (another group, filtered out, or not
+   * tracked) stay at the top level with a "↳ parent" hint.
+   */
+  function nest(items: Item[], nested: boolean): Row[] {
+    const here = new Set(items.map((i) => i.id));
+    const children = new Map<string, Item[]>();
+    const roots: Item[] = [];
+    for (const it of items) {
+      if (nested && it.parentId && here.has(it.parentId)) {
+        const list = children.get(it.parentId) ?? [];
+        list.push(it);
+        children.set(it.parentId, list);
+      } else {
+        roots.push(it);
+      }
+    }
+    const rows: Row[] = [];
+    const seen = new Set<string>();
+    const visit = (it: Item, depth: number) => {
+      if (seen.has(it.id)) return; // guards against cycles
+      seen.add(it.id);
+      const nestedHere = depth > 0;
+      rows.push({
+        item: it,
+        depth,
+        parentTitle: !nestedHere && it.parentId ? (byId.get(it.parentId)?.title ?? null) : null,
+      });
+      for (const c of children.get(it.id) ?? []) visit(c, depth + 1);
+    };
+    for (const r of roots) visit(r, 0);
+    // Anything left over is part of a parent cycle; show it flat.
+    for (const it of items) if (!seen.has(it.id)) visit(it, 0);
+    return rows;
   }
 
   const bucketNames: Record<DueBucket, string> = {
@@ -53,9 +101,11 @@
     const map = new Map<string, Group>();
     if (store.groupBy === "due") {
       for (const b of Object.keys(bucketNames) as DueBucket[])
-        map.set(b, { key: b, title: bucketNames[b], icon: "calendar", items: [] });
+        map.set(b, { key: b, title: bucketNames[b], icon: "calendar", items: [], rows: [] });
       for (const it of store.visible) map.get(dueBucket(it.due))!.items.push(it);
-      return [...map.values()].filter((g) => g.items.length);
+      return [...map.values()]
+        .filter((g) => g.items.length)
+        .map((g) => ({ ...g, rows: nest(g.items, false) }));
     }
     const lists = new Map(store.snap?.reminderLists.map((l) => [l.id, l]) ?? []);
     for (const it of store.visible) {
@@ -68,19 +118,22 @@
           icon: it.kind === "reminder" ? "list" : it.kind === "draftIssue" ? "stack" : "github",
           color: it.kind === "reminder" ? lists.get(it.containerId)?.color : null,
           items: [],
+          rows: [],
         };
         map.set(key, g);
       }
       g.items.push(it);
     }
-    return [...map.values()].sort((a, b) => {
-      const ar = a.key.startsWith("rem:") ? 0 : 1;
-      const br = b.key.startsWith("rem:") ? 0 : 1;
-      return ar - br || a.title.localeCompare(b.title);
-    });
+    return [...map.values()]
+      .sort((a, b) => {
+        const ar = a.key.startsWith("rem:") ? 0 : 1;
+        const br = b.key.startsWith("rem:") ? 0 : 1;
+        return ar - br || a.title.localeCompare(b.title);
+      })
+      .map((g) => ({ ...g, rows: nest(g.items, true) }));
   });
 
-  const flat = $derived(groups.flatMap((g) => g.items));
+  const flat = $derived(groups.flatMap((g) => (collapsed[g.key] ? [] : g.rows.map((r) => r.item))));
   let collapsed = $state<Record<string, boolean>>({});
 
   function setTab(tab: string) {
@@ -264,13 +317,15 @@
               <span class="faint">{g.items.filter((i) => !i.completed).length}</span>
             </button>
             {#if !collapsed[g.key]}
-              {#each g.items as item (item.id)}
+              {#each g.rows as { item, depth, parentTitle } (item.id)}
                 <div id="row-{item.id}">
                   <ItemRow
                     {item}
+                    {depth}
+                    {parentTitle}
                     selected={store.selectedId === item.id}
                     showContainer={store.groupBy !== "source"}
-                    onselect={() => (store.selectedId = item.id)}
+                    onselect={() => (store.selectedId = store.selectedId === item.id ? null : item.id)}
                   />
                 </div>
               {/each}

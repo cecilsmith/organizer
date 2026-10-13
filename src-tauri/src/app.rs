@@ -780,6 +780,8 @@ fn placeholder() -> Item {
         status: None,
         project_ids: vec![],
         updated_at: None,
+        parent_id: None,
+        sub_issues: None,
         categories: vec![],
     }
 }

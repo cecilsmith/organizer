@@ -2,21 +2,43 @@
   import type { Item } from "$lib/api";
   import { store, dueBucket, formatDue } from "$lib/store.svelte";
   import Icon from "./Icon.svelte";
+  import { stripTags } from "$lib/tags";
 
   let {
     item,
     selected = false,
     showContainer = true,
+    depth = 0,
+    parentTitle = null,
     onselect,
-  }: { item: Item; selected?: boolean; showContainer?: boolean; onselect: () => void } = $props();
+  }: {
+    item: Item;
+    selected?: boolean;
+    showContainer?: boolean;
+    /** Nesting level for sub-issues shown under their parent. */
+    depth?: number;
+    /** Set when the parent isn't shown directly above this row. */
+    parentTitle?: string | null;
+    onselect: () => void;
+  } = $props();
 
-  let expanded = $state(false);
   const menuOpen = $derived(store.menuFor === item.id);
 
   const cats = $derived(store.categories.filter((c) => item.categories.includes(c.id)));
   const color = $derived(cats[0]?.color ?? "var(--text-3)");
   const categoryTags = $derived(
     new Set(store.categories.flatMap((c) => [c.label.toLowerCase(), c.name.toLowerCase()])),
+  );
+  // The selected row shows its notes in full. Previews of other rows leave out
+  // area hashtags (the area already shows on the row) and skip notes that are
+  // nothing but those tags.
+  const preview = $derived(
+    item.kind === "reminder" ? stripTags(item.body ?? "", (t) => categoryTags.has(t)) : "",
+  );
+  const notes = $derived(selected ? (item.body ?? "").trim() : preview);
+  // GitHub descriptions are long Markdown, so they only open for the selected row.
+  const showNotes = $derived(
+    !!notes && (selected || (store.showNotes === "always" && item.kind === "reminder")),
   );
   const labels = $derived(item.labels.filter((l) => !categoryTags.has(l.name.toLowerCase())));
   const bucket = $derived(dueBucket(item.due));
@@ -42,6 +64,8 @@
 
 <div
   class="row"
+  style:--depth={depth}
+  class:child={depth > 0}
   class:selected
   class:done={item.completed}
   role="option"
@@ -49,7 +73,6 @@
   tabindex="-1"
   onclick={() => {
     onselect();
-    if (item.body) expanded = !expanded;
   }}
   ondblclick={() => store.edit(item)}
   onkeydown={() => {}}
@@ -86,6 +109,14 @@
       {:else if item.number}
         <span class="faint">#{item.number}</span>
       {/if}
+      {#if parentTitle}
+        <span class="parent" title="Sub-issue of “{parentTitle}”">↳ {parentTitle}</span>
+      {/if}
+      {#if item.subIssues}
+        <span class="subs" title="{item.subIssues.completed} of {item.subIssues.total} sub-issues done">
+          <Icon name="list" size={12} />{item.subIssues.completed}/{item.subIssues.total}
+        </span>
+      {/if}
       {#if item.due}
         <span class="due {bucket}"><Icon name="calendar" size={12} />{formatDue(item.due)}</span>
       {/if}
@@ -102,8 +133,8 @@
         {/each}
       {/if}
     </div>
-    {#if expanded && item.body}
-      <div class="body selectable">{item.body}</div>
+    {#if showNotes}
+      <div class="body selectable" class:preview={!selected}>{notes}</div>
     {/if}
   </div>
 
@@ -160,10 +191,11 @@
 
 <style>
   .row {
+    --depth: 0;
     display: flex;
     align-items: flex-start;
     gap: 10px;
-    padding: 7px 10px 7px 12px;
+    padding: 7px 10px 7px calc(12px + var(--depth) * 27px);
     border-radius: 8px;
     position: relative;
     transition: opacity 0.25s;
@@ -171,6 +203,27 @@
   }
   .row:hover {
     background: var(--bg-hover);
+  }
+  /* A guide line from the parent's checkbox down to its sub-issues. */
+  .row.child::before {
+    content: "";
+    position: absolute;
+    left: calc(20px + (var(--depth) - 1) * 27px);
+    top: 0;
+    bottom: 0;
+    border-left: 1px solid var(--border-strong);
+  }
+  .parent {
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .subs {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-variant-numeric: tabular-nums;
   }
   .row.selected {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
@@ -282,6 +335,18 @@
     white-space: pre-wrap;
     max-height: 220px;
     overflow: auto;
+  }
+  .body.preview {
+    margin-top: 3px;
+    padding: 0;
+    background: none;
+    color: var(--text-3);
+    max-height: none;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
   }
   .actions {
     display: flex;

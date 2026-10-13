@@ -373,6 +373,8 @@ mod mac {
                 status: None,
                 project_ids: vec![],
                 updated_at: r.lastModifiedDate().and_then(|d| rfc3339(&d)),
+                parent_id: None,
+                sub_issues: None,
                 categories: vec![],
             }
         }
