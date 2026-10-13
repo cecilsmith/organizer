@@ -811,6 +811,8 @@ fn merge_copies(rows: Vec<(String, Item)>) -> Vec<Item> {
                     }
                 }
                 base.status = base.status.or(other.status);
+                // Only the project copy may carry a project date.
+                base.due = base.due.or(other.due);
                 base.completed |= other.completed;
                 *existing = base;
             }
@@ -924,6 +926,14 @@ mod tests {
         assert_eq!(out[0].title, "v2026-01-03");
         assert_eq!(out[0].project_ids, vec!["P2", "P1"]);
         assert_eq!(out[0].status.as_deref(), Some("In progress"));
+    }
+
+    #[test]
+    fn merge_keeps_a_project_date_from_an_older_copy() {
+        let mut from_project = issue("2026-01-01", Some("P1"), None);
+        from_project.due = Some("2026-02-01".into());
+        let out = merge_copies(vec![("P1".into(), from_project), ("R1".into(), issue("2026-01-02", None, None))]);
+        assert_eq!(out[0].due.as_deref(), Some("2026-02-01"));
     }
 
     #[test]

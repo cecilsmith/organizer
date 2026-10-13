@@ -1,10 +1,13 @@
 import { listen } from "@tauri-apps/api/event";
 import { api, errorText, type Item, type ItemPatch, type Snapshot } from "./api";
+import { addDays, addMonths, parseYmd, ymd } from "./dates";
 
 export type SourceFilter = "all" | "reminders" | "github";
 export type GroupBy = "source" | "due";
 /** Whether reminder notes show under every row, or only the selected one. */
 export type ShowNotes = "always" | "selected";
+export type View = "list" | "calendar";
+export type CalView = "month" | "week" | "day";
 
 /** One undoable change: how to reverse it, and how to apply it again. */
 export interface UndoEntry {
@@ -29,7 +32,18 @@ const FOCUS_SYNC_AFTER_MS = 30_000;
 
 const PREFS_KEY = "organizer.prefs";
 
-function loadPrefs(): Partial<{ tab: string; groupBy: GroupBy; sourceFilter: SourceFilter; showNotes: ShowNotes }> {
+interface Prefs {
+  tab: string;
+  groupBy: GroupBy;
+  sourceFilter: SourceFilter;
+  showNotes: ShowNotes;
+  view: View;
+  calView: CalView;
+  weekStart: number;
+  showUnscheduled: boolean;
+}
+
+function loadPrefs(): Partial<Prefs> {
   try {
     return JSON.parse(localStorage.getItem(PREFS_KEY) ?? "{}");
   } catch {
@@ -44,6 +58,15 @@ class Store {
   sourceFilter = $state<SourceFilter>("all");
   groupBy = $state<GroupBy>("source");
   showNotes = $state<ShowNotes>("selected");
+  view = $state<View>("list");
+  calView = $state<CalView>("month");
+  /** The day the calendar is showing (any day within the visible month/week). */
+  calDate = $state<string>(ymd(new Date()));
+  /** 0 = Sunday, 1 = Monday. */
+  weekStart = $state(0);
+  showUnscheduled = $state(true);
+  /** Set to prefill the quick-add due date (`YYYY-MM-DD` or with `THH:MM`). */
+  quickAddDue = $state<string | null>(null);
   settingsOpen = $state(false);
   settingsSection = $state<string>("accounts");
   toasts = $state<Toast[]>([]);
@@ -74,6 +97,10 @@ class Store {
     if (p.tab) this.tab = p.tab;
     if (p.groupBy) this.groupBy = p.groupBy;
     if (p.showNotes) this.showNotes = p.showNotes;
+    if (p.view) this.view = p.view;
+    if (p.calView) this.calView = p.calView;
+    if (p.weekStart === 0 || p.weekStart === 1) this.weekStart = p.weekStart;
+    if (typeof p.showUnscheduled === "boolean") this.showUnscheduled = p.showUnscheduled;
     if (p.sourceFilter) this.sourceFilter = p.sourceFilter;
   }
 
@@ -86,7 +113,11 @@ class Store {
           groupBy: this.groupBy,
           sourceFilter: this.sourceFilter,
           showNotes: this.showNotes,
-        }),
+          view: this.view,
+          calView: this.calView,
+          weekStart: this.weekStart,
+          showUnscheduled: this.showUnscheduled,
+        } satisfies Prefs),
       );
     } catch {
       /* storage unavailable; prefs are a convenience */
@@ -322,6 +353,56 @@ class Store {
       this.toast(`Couldn't ${dir} ${entry.label}: ${errorText(e)}`);
     } finally {
       this.undoing = false;
+    }
+  }
+
+  /** Steps the calendar by one month, week or day. */
+  calShift(dir: number) {
+    const d = parseYmd(this.calDate);
+    const next =
+      this.calView === "month" ? addMonths(d, dir) : addDays(d, dir * (this.calView === "week" ? 7 : 1));
+    this.calDate = ymd(next);
+  }
+
+  calToday() {
+    this.calDate = ymd(new Date());
+  }
+
+  setView(view: View) {
+    this.view = view;
+    this.menuFor = null;
+    this.savePrefs();
+  }
+
+  /**
+   * Moves a reminder to another day (keeping its time unless `due` has one).
+   * GitHub dates come from milestones and project fields, so they can't be
+   * dragged here.
+   */
+  async reschedule(item: Item, due: string) {
+    if (item.kind !== "reminder") {
+      this.toast("GitHub dates come from milestones or project fields — change them on GitHub.", "info");
+      return;
+    }
+    if (due === item.due) return;
+    const prev = item.due ?? "";
+    this.overrides[item.id] = { ...this.overrides[item.id], due };
+    try {
+      const updated = await api.updateItem(item.id, { due }, item);
+      this.record(
+        `reschedule “${item.title}”`,
+        () => api.updateItem(item.id, { due: prev }, updated),
+        () => api.updateItem(item.id, { due }, item),
+      );
+      await this.refresh();
+    } catch (e) {
+      this.toast(errorText(e));
+    } finally {
+      const o = this.overrides[item.id];
+      if (o) {
+        delete o.due;
+        if (Object.keys(o).length === 0) delete this.overrides[item.id];
+      }
     }
   }
 

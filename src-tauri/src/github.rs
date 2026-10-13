@@ -333,6 +333,9 @@ impl GitHub {
                   nodes {{
                     id isArchived
                     status: fieldValueByName(name: "Status") {{ ... on ProjectV2ItemFieldSingleSelectValue {{ name }} }}
+                    fieldValues(first: 20) {{ nodes {{
+                      ... on ProjectV2ItemFieldDateValue {{ date field {{ ... on ProjectV2FieldCommon {{ name }} }} }}
+                    }} }}
                     content {{
                       __typename
                       ...IssueFields
@@ -385,6 +388,10 @@ impl GitHub {
                     }
                 };
                 item.status = node["status"]["name"].as_str().map(Into::into);
+                // A milestone due date wins; otherwise use the project's date field.
+                if item.due.is_none() {
+                    item.due = project_due_date(&node["fieldValues"]["nodes"]);
+                }
                 item.project_ids = vec![project.id.clone()];
                 items.push(item);
             }
@@ -685,6 +692,34 @@ fn logins(conn: &Value) -> Vec<String> {
     conn["nodes"].as_array().into_iter().flatten().filter_map(|n| n["login"].as_str().map(Into::into)).collect()
 }
 
+/// Picks the project date field that means "when it's due": one named like
+/// due/deadline/target/end/date, skipping start dates.
+fn project_due_date(values: &Value) -> Option<String> {
+    let dates: Vec<(String, String)> = values
+        .as_array()?
+        .iter()
+        .filter_map(|v| Some((v["field"]["name"].as_str()?.to_lowercase(), v["date"].as_str()?.to_string())))
+        .collect();
+    let rank = |name: &str| {
+        if name.contains("start") || name.contains("begin") {
+            None
+        } else if ["due", "deadline"].iter().any(|k| name.contains(k)) {
+            Some(0)
+        } else if ["target", "end", "finish"].iter().any(|k| name.contains(k)) {
+            Some(1)
+        } else if name.contains("date") {
+            Some(2)
+        } else {
+            None
+        }
+    };
+    dates
+        .iter()
+        .filter_map(|(name, date)| Some((rank(name)?, date)))
+        .min_by_key(|(r, _)| *r)
+        .map(|(_, d)| d.chars().take(10).collect())
+}
+
 fn repo_candidate(n: &Value) -> Option<Candidate> {
     Some(Candidate {
         id: n["id"].as_str()?.into(),
@@ -793,6 +828,20 @@ mod tests {
         assert!(it.completed);
 
         assert!(content_item(&json!({ "__typename": "DraftIssue", "id": "x" }), "a").is_none());
+    }
+
+    #[test]
+    fn picks_due_like_project_date_fields() {
+        let values = json!([
+            { "date": "2026-10-01", "field": { "name": "Start date" } },
+            { "date": "2026-10-20", "field": { "name": "Target date" } },
+            {},
+            { "date": "2026-10-15", "field": { "name": "Due" } }
+        ]);
+        assert_eq!(project_due_date(&values).as_deref(), Some("2026-10-15"));
+        let only_start = json!([{ "date": "2026-10-01", "field": { "name": "Start" } }]);
+        assert_eq!(project_due_date(&only_start), None);
+        assert_eq!(project_due_date(&json!([])), None);
     }
 
     #[test]

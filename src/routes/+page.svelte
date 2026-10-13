@@ -5,6 +5,7 @@
   import Icon from "$lib/components/Icon.svelte";
   import ItemRow from "$lib/components/ItemRow.svelte";
   import EditPanel from "$lib/components/EditPanel.svelte";
+  import Calendar from "$lib/components/calendar/Calendar.svelte";
   import QuickAdd from "$lib/components/QuickAdd.svelte";
   import Settings from "$lib/components/Settings.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -186,6 +187,11 @@
       return;
     }
     if (typing || store.settingsOpen) return;
+    if (e.key === "v") {
+      store.setView(store.view === "list" ? "calendar" : "list");
+      return;
+    }
+    if (store.view === "calendar" && calendarKey(e)) return;
     const selected = flat.find((it) => it.id === store.selectedId);
     switch (e.key) {
       case "ArrowDown":
@@ -233,6 +239,42 @@
     }
   }
 
+  /** Calendar keys: ←/→ step the period, T jumps to today, plus actions on the selected item. */
+  function calendarKey(e: KeyboardEvent): boolean {
+    const selected = store.items.find((it) => it.id === store.selectedId);
+    switch (e.key) {
+      case "ArrowLeft":
+      case "h":
+        store.calShift(-1);
+        break;
+      case "ArrowRight":
+      case "l":
+        store.calShift(1);
+        break;
+      case "t":
+        store.calToday();
+        break;
+      case " ":
+      case "x":
+        if (!selected || selected.kind === "pullRequest") return false;
+        store.toggle(selected);
+        break;
+      case "Enter":
+      case "e":
+        if (!selected) return false;
+        store.edit(selected);
+        break;
+      case "o":
+        if (!selected) return false;
+        store.open(selected);
+        break;
+      default:
+        return false;
+    }
+    e.preventDefault();
+    return true;
+  }
+
   function setSource(s: SourceFilter) {
     store.sourceFilter = s;
     store.savePrefs();
@@ -273,14 +315,23 @@
           <button class:on={store.sourceFilter === v} onclick={() => setSource(v as SourceFilter)}>{label}</button>
         {/each}
       </div>
-      <div class="seg" role="group" aria-label="Group by">
-        <button class:on={store.groupBy === "source"} onclick={() => setGroup("source")} title="Group by list / repo"><Icon name="list" size={14} /></button>
-        <button class:on={store.groupBy === "due"} onclick={() => setGroup("due")} title="Group by due date"><Icon name="calendar" size={14} /></button>
+      {#if store.view === "list"}
+        <div class="seg" role="group" aria-label="Group by">
+          <button class:on={store.groupBy === "source"} onclick={() => setGroup("source")} title="Group by list / repo"><Icon name="stack" size={14} /></button>
+          <button class:on={store.groupBy === "due"} onclick={() => setGroup("due")} title="Group by due date"><Icon name="flag" size={14} /></button>
+        </div>
+      {/if}
+      <div class="seg view" role="group" aria-label="View">
+        <button class:on={store.view === "list"} onclick={() => store.setView("list")} title="List (V)"><Icon name="list" size={14} /> List</button>
+        <button class:on={store.view === "calendar"} onclick={() => store.setView("calendar")} title="Calendar (V)"><Icon name="calendar" size={14} /> Calendar</button>
       </div>
     </header>
 
     <QuickAdd bind:inputEl={addInput} />
 
+    {#if store.view === "calendar" && connected}
+      <Calendar />
+    {:else}
     <div class="scroll" role="listbox" aria-label="To-dos">
       {#if store.snap && !connected}
         <div class="welcome">
@@ -343,6 +394,7 @@
         {/each}
       {/if}
     </div>
+    {/if}
   </main>
 </div>
 
@@ -443,6 +495,11 @@
     border-radius: 5px;
     font-size: 12px;
     color: var(--text-2);
+  }
+  .seg.view button {
+    display: flex;
+    align-items: center;
+    gap: 5px;
   }
   .seg button.on {
     background: var(--bg-elev);

@@ -283,6 +283,23 @@
             </label>
           {/each}
         </div>
+        <h4>Calendar weeks start on</h4>
+        <div class="seg-choice">
+          {#each [[0, "Sunday"], [1, "Monday"]] as [value, name] (value)}
+            <label class="choice inline" class:on={store.weekStart === value}>
+              <input
+                type="radio"
+                name="week-start"
+                checked={store.weekStart === value}
+                onchange={() => {
+                  store.weekStart = value as number;
+                  store.savePrefs();
+                }}
+              />
+              <strong>{name}</strong>
+            </label>
+          {/each}
+        </div>
         <p class="faint small-note">
           The selected item always shows its notes in full. Previews leave out area hashtags like <code>#school</code>,
           since the area already shows on the row. GitHub descriptions only open for the selected item.
@@ -501,6 +518,14 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+  }
+  .seg-choice {
+    display: flex;
+    gap: 8px;
+  }
+  .choice.inline {
+    align-items: center;
+    padding: 8px 14px;
   }
   .small-note {
     margin-top: 12px;

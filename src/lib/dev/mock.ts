@@ -58,6 +58,11 @@ const snap: Snapshot = {
     item({ id: "rem:2", kind: "reminder", title: "Problem set 4", containerId: "L2", containerName: "Homework", due: `${day(0)}T23:59`, priority: 1, body: "Questions 1–7, show work for #5.", categories: ["school"] }),
     item({ id: "rem:3", kind: "reminder", title: "Book climbing gym #fun", containerId: "L3", containerName: "Someday", categories: ["fun"] }),
     item({ id: "rem:4", kind: "reminder", title: "Renew passport", containerId: "L3", containerName: "Someday", body: "#school", due: day(12) }),
+    item({ id: "rem:5", kind: "reminder", title: "Dentist", containerId: "L1", containerName: "Errands", due: `${day(1)}T09:30`, categories: ["personal"] }),
+    item({ id: "rem:6", kind: "reminder", title: "Study group", containerId: "L2", containerName: "Homework", due: `${day(0)}T10:00`, categories: ["school"] }),
+    item({ id: "rem:7", kind: "reminder", title: "Call landlord", containerId: "L1", containerName: "Errands", due: `${day(0)}T10:15`, categories: ["personal"] }),
+    item({ id: "rem:8", kind: "reminder", title: "Pay rent", containerId: "L1", containerName: "Errands", due: day(18), priority: 1, categories: ["personal"] }),
+    item({ id: "rem:9", kind: "reminder", title: "Concert tickets on sale", containerId: "L3", containerName: "Someday", due: `${day(4)}T12:00`, categories: ["fun"] }),
     item({ id: "gh:I1", kind: "issue", title: "Write related-work section", containerId: "R1", containerName: "octo/thesis", number: 12, accountId: "octo@github.com", labels: [{ name: "writing", color: "0e8a16" }], due: day(3), categories: ["school"] }),
     item({ id: "gh:I2", kind: "issue", title: "Checkout fails on Safari 18", containerId: "R2", containerName: "acme/storefront", number: 231, accountId: "octo@github.com", labels: [{ name: "bug", color: "d73a4a" }, { name: "business", color: "f2994a" }], status: "In progress", projectIds: ["P1"], assignees: ["octo"], subIssues: { total: 3, completed: 1 }, categories: ["business"] }),
     item({ id: "gh:I3", kind: "issue", title: "Reproduce on iOS Safari", containerId: "R2", containerName: "acme/storefront", number: 232, accountId: "octo@github.com", parentId: "gh:I2", categories: ["business"] }),
@@ -139,7 +144,17 @@ export function installMock() {
           return structuredClone(it);
         }
         case "create_item": {
-          const req = a.item as { target: string; title: string; listId?: string; repoId?: string; category?: string };
+          const req = a.item as {
+            target: string;
+            title: string;
+            listId?: string;
+            repoId?: string;
+            category?: string;
+            due?: string | null;
+            notes?: string | null;
+            body?: string | null;
+            priority?: number;
+          };
           const list = snap.reminderLists.find((l) => l.id === req.listId);
           const repo = snap.repos.find((r) => r.id === req.repoId);
           const it = item({
@@ -149,6 +164,9 @@ export function installMock() {
             containerId: list?.id ?? repo?.id ?? "",
             containerName: list?.title ?? `${repo?.owner}/${repo?.name}`,
             categories: req.category ? [req.category] : [],
+            due: req.due ?? null,
+            body: req.notes ?? req.body ?? null,
+            priority: req.priority ?? 0,
           });
           snap.items.push(it);
           return it;

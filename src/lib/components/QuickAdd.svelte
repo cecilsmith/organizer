@@ -61,6 +61,19 @@
     } catch {}
   }
 
+  // The calendar asks for a prefilled date (double-click on a day or time slot).
+  $effect(() => {
+    const preset = store.quickAddDue;
+    if (preset === null) return;
+    store.quickAddDue = null;
+    due = preset.slice(0, 10);
+    time = preset.length > 10 ? preset.slice(11, 16) : "";
+    expanded = true;
+    // Dates only apply to reminders; switch away from a GitHub target.
+    if (!isReminder && lists[0]) pick(`rem:${lists[0].id}`);
+    inputEl?.focus();
+  });
+
   function reset() {
     title = "";
     notes = "";
