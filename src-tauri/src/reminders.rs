@@ -283,6 +283,16 @@ mod mac {
             self.modify(id, move |r| unsafe { r.setCompleted(completed) }).await
         }
 
+        /// Deletes a reminder. Only used to undo creating one.
+        pub async fn remove(&self, id: String) -> Result<()> {
+            self.exec(move |s, reply| {
+                let res = find(s, &id)
+                    .and_then(|r| unsafe { s.ek.removeReminder_commit_error(&r, true) }.map_err(ns_err));
+                let _ = reply.send(res);
+            })
+            .await
+        }
+
         pub async fn move_to_list(&self, id: String, list_id: String) -> Result<()> {
             self.exec(move |s, reply| {
                 let res = unsafe {
@@ -444,6 +454,9 @@ mod other {
             unsupported()
         }
         pub async fn update(&self, _: String, _: ReminderPatch) -> Result<Item> {
+            unsupported()
+        }
+        pub async fn remove(&self, _: String) -> Result<()> {
             unsupported()
         }
         pub async fn move_to_list(&self, _: String, _: String) -> Result<()> {

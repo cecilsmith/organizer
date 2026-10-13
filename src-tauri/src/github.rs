@@ -465,6 +465,17 @@ impl GitHub {
         Ok(())
     }
 
+    pub async fn unarchive_project_item(&self, host: &str, token: &str, project_id: &str, item_id: &str) -> Result<()> {
+        self.graphql(
+            host,
+            token,
+            "mutation($p: ID!, $i: ID!) { unarchiveProjectV2Item(input: { projectId: $p, itemId: $i }) { item { id } } }",
+            json!({ "p": project_id, "i": item_id }),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn set_issue_closed(
         &self,
         host: &str,
@@ -482,6 +493,21 @@ impl GitHub {
         let n = number.to_string();
         self.rest(reqwest::Method::PATCH, host, token, &["repos", owner, name, "issues", &n], Some(body))
             .await?;
+        Ok(())
+    }
+
+    /// Closes an issue as "not planned" — used to undo creating one, since
+    /// issues can't be deleted with a normal token.
+    pub async fn close_not_planned(&self, host: &str, token: &str, owner: &str, name: &str, number: i64) -> Result<()> {
+        let n = number.to_string();
+        self.rest(
+            reqwest::Method::PATCH,
+            host,
+            token,
+            &["repos", owner, name, "issues", &n],
+            Some(json!({ "state": "closed", "state_reason": "not_planned" })),
+        )
+        .await?;
         Ok(())
     }
 

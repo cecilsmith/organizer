@@ -78,6 +78,8 @@ Open **Settings** (⌘,).
 | ⌘S / ⌘Enter | Save (in the editor) |
 | Esc | Close the editor (press twice to discard changes) |
 | `m` | Move to area |
+| ⌘Z / Ctrl+Z | Undo the last change (complete, move, edit or add) |
+| ⌘⇧Z / Ctrl+Shift+Z | Redo the last undone change |
 | ⌘R | Sync now |
 
 ## Tests

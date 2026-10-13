@@ -155,6 +155,15 @@
     // The editor panel handles its own keys.
     if (store.editing) return;
     const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
+    // ⌘Z undoes the last change and ⌘⇧Z redoes it (Ctrl works too). While
+    // you're typing, they undo/redo text instead.
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
+      if (typing || store.settingsOpen) return;
+      e.preventDefault();
+      if (e.shiftKey) store.redo();
+      else store.undo();
+      return;
+    }
     if (e.metaKey) {
       const n = Number(e.key);
       if (n >= 1 && n <= 9) {
@@ -351,6 +360,15 @@
   {#each store.toasts as t (t.id)}
     <div class="toast {t.kind}" role="status">
       <span class="selectable">{t.text}</span>
+      {#if t.action}
+        <button
+          class="btn ghost toast-action"
+          onclick={() => {
+            store.dismiss(t.id);
+            t.action?.run();
+          }}>{t.action.label}</button
+        >
+      {/if}
       <button class="icon-btn" onclick={() => store.dismiss(t.id)} aria-label="Dismiss"><Icon name="x" size={12} /></button>
     </div>
   {/each}
@@ -532,6 +550,10 @@
   .toast span {
     flex: 1;
     padding-top: 3px;
+  }
+  .toast-action {
+    height: 22px;
+    color: var(--accent);
   }
   .toast.error {
     border-left: 3px solid var(--danger);

@@ -173,10 +173,15 @@ export const api = {
   deleteCategory: (id: string) => invoke<void>("delete_category", { id }),
 
   createItem: (item: NewItem) => invoke<Item>("create_item", { item }),
-  setCompleted: (id: string, completed: boolean) => invoke<void>("set_completed", { id, completed }),
+  /** `fallback` lets undo work after a sync has dropped the item from the cache. */
+  setCompleted: (id: string, completed: boolean, fallback?: Item) =>
+    invoke<void>("set_completed", { id, completed, fallback: fallback ?? null }),
+  /** Undoes creating an item: deletes a reminder, or closes an issue as not planned. */
+  discardItem: (id: string) => invoke<void>("discard_item", { id }),
   setCategory: (id: string, category: string | null) => invoke<void>("set_category", { id, category }),
   itemDetails: (id: string) => invoke<ItemDetails>("item_details", { id }),
-  updateItem: (id: string, patch: ItemPatch) => invoke<Item>("update_item", { id, patch }),
+  updateItem: (id: string, patch: ItemPatch, fallback?: Item) =>
+    invoke<Item>("update_item", { id, patch, fallback: fallback ?? null }),
   openItem: (id: string) => invoke<void>("open_item", { id }),
   openUrl: (url: string) => invoke<void>("open_url", { url }),
 };

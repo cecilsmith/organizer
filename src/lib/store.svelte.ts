@@ -1,10 +1,20 @@
 import { listen } from "@tauri-apps/api/event";
-import { api, errorText, type Item, type Snapshot } from "./api";
+import { api, errorText, type Item, type ItemPatch, type Snapshot } from "./api";
 
 export type SourceFilter = "all" | "reminders" | "github";
 export type GroupBy = "source" | "due";
 /** Whether reminder notes show under every row, or only the selected one. */
 export type ShowNotes = "always" | "selected";
+
+/** One undoable change: how to reverse it, and how to apply it again. */
+export interface UndoEntry {
+  /** Describes the original change, e.g. `complete “Buy milk”`. */
+  label: string;
+  undo: () => Promise<unknown>;
+  redo: () => Promise<unknown>;
+}
+
+const UNDO_LIMIT = 50;
 
 export interface Toast {
   id: number;
@@ -47,6 +57,12 @@ class Store {
   private overrides = $state<Record<string, Partial<Item>>>({});
   /** Recently completed items that should remain visible even if a sync drops them. */
   private lingering = $state<Record<string, Item>>({});
+
+  /** Most recent change last. Both stacks live for the session only. */
+  private undoStack: UndoEntry[] = [];
+  /** Changes that were undone, most recent last; cleared by any new change. */
+  private redoStack: UndoEntry[] = [];
+  private undoing = false;
 
   private refreshing = false;
   private refreshAgain = false;
@@ -189,7 +205,7 @@ class Store {
 
   // ---- actions --------------------------------------------------------------
 
-  async toggle(item: Item) {
+  async toggle(item: Item, recordUndo = true) {
     const completed = !item.completed;
     this.overrides[item.id] = { ...this.overrides[item.id], completed };
     if (completed) {
@@ -198,12 +214,31 @@ class Store {
         delete this.lingering[item.id];
         if (this.overrides[item.id]?.completed) delete this.overrides[item.id];
       }, LINGER_MS);
+    } else {
+      delete this.lingering[item.id];
     }
     try {
-      await api.setCompleted(item.id, completed);
+      await api.setCompleted(item.id, completed, item);
+      if (recordUndo) {
+        // `toggle` flips whatever state it's given, so pass the opposite of the target.
+        const before = { ...item };
+        const after = { ...item, completed };
+        this.record(
+          `${completed ? "complete" : "reopen"} “${item.title}”`,
+          () => this.toggle(after, false),
+          () => this.toggle(before, false),
+        );
+      }
+      if (!completed) {
+        // Reopened items come back through the snapshot; drop the override once it's there.
+        await this.refresh();
+        delete this.overrides[item.id];
+      }
     } catch (e) {
       delete this.overrides[item.id];
       delete this.lingering[item.id];
+      // When undoing, the caller reports the failure.
+      if (!recordUndo) throw e;
       this.toast(errorText(e));
     }
   }
@@ -213,6 +248,17 @@ class Store {
     this.overrides[item.id] = { ...this.overrides[item.id], categories: category ? [category] : [] };
     try {
       await api.setCategory(item.id, category);
+      // Moving an area rewrites labels (GitHub) or list, notes and title (Reminders); undo restores them.
+      const restore: ItemPatch =
+        item.kind === "reminder"
+          ? { listId: item.containerId, title: item.title, body: item.body ?? "" }
+          : { labels: item.labels.map((l) => l.name) };
+      const name = this.categories.find((c) => c.id === category)?.name ?? "Inbox";
+      this.record(
+        `move “${item.title}” to ${name}`,
+        () => api.updateItem(item.id, restore, item),
+        () => api.setCategory(item.id, category),
+      );
       await this.refresh();
     } catch (e) {
       this.overrides[item.id] = { ...this.overrides[item.id], categories: prev };
@@ -226,6 +272,56 @@ class Store {
           if (Object.keys(o).length === 0) delete this.overrides[item.id];
         }
       }, 1500);
+    }
+  }
+
+  /** Remembers how to reverse (and re-apply) a change that just succeeded. */
+  record(label: string, undo: () => Promise<unknown>, redo: () => Promise<unknown>): UndoEntry {
+    const entry = { label, undo, redo };
+    this.undoStack.push(entry);
+    if (this.undoStack.length > UNDO_LIMIT) this.undoStack.shift();
+    // A new change starts a new branch of history.
+    this.redoStack = [];
+    return entry;
+  }
+
+  /**
+   * Reverses the most recent change (⌘Z / Ctrl+Z), or a specific one, e.g.
+   * from a toast's Undo button.
+   */
+  async undo(target?: UndoEntry) {
+    let entry: UndoEntry | undefined;
+    if (target) {
+      const i = this.undoStack.indexOf(target);
+      if (i < 0 || this.undoing) return; // already undone, or busy
+      entry = this.undoStack.splice(i, 1)[0];
+    } else if (!this.undoing) {
+      entry = this.undoStack.pop();
+      if (!entry) return this.toast("Nothing to undo", "info");
+    }
+    if (entry) await this.step(entry, "undo");
+  }
+
+  /** Re-applies the most recently undone change (⌘⇧Z / Ctrl+Shift+Z). */
+  async redo() {
+    if (this.undoing) return;
+    const entry = this.redoStack.pop();
+    if (!entry) return this.toast("Nothing to redo", "info");
+    await this.step(entry, "redo");
+  }
+
+  /** Runs one side of an entry and moves it to the other stack if it worked. */
+  private async step(entry: UndoEntry, dir: "undo" | "redo") {
+    this.undoing = true;
+    try {
+      await entry[dir]();
+      (dir === "undo" ? this.redoStack : this.undoStack).push(entry);
+      await this.refresh();
+      this.toast(`${dir === "undo" ? "Undid" : "Redid"} ${entry.label}`, "info");
+    } catch (e) {
+      this.toast(`Couldn't ${dir} ${entry.label}: ${errorText(e)}`);
+    } finally {
+      this.undoing = false;
     }
   }
 
@@ -247,7 +343,8 @@ class Store {
   toast(text: string, kind: Toast["kind"] = "error", action?: Toast["action"]) {
     const id = ++this.toastSeq;
     this.toasts.push({ id, text, kind, action });
-    setTimeout(() => this.dismiss(id), kind === "error" ? 7000 : 3500);
+    // Toasts with a button (like Undo) stay long enough to reach for it.
+    setTimeout(() => this.dismiss(id), action ? 8000 : kind === "error" ? 7000 : 3500);
   }
 
   dismiss(id: number) {

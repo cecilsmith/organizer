@@ -176,12 +176,33 @@
 
   // ---- actions ----------------------------------------------------------------
 
+  /** A patch that puts back the original value of every field in `p`. */
+  function inversePatch(p: ItemPatch): ItemPatch {
+    const o = original;
+    const inv: ItemPatch = {};
+    if (p.title !== undefined) inv.title = o.title;
+    if (p.body !== undefined) inv.body = o.body;
+    if (p.due !== undefined) inv.due = o.dueDate ? (o.dueTime ? `${o.dueDate}T${o.dueTime}` : o.dueDate) : "";
+    if (p.priority !== undefined) inv.priority = o.priority;
+    if (p.listId !== undefined) inv.listId = o.listId;
+    if (p.labels !== undefined) inv.labels = [...o.labels];
+    if (p.assignees !== undefined) inv.assignees = [...o.assignees];
+    return inv;
+  }
+
   /** Returns whether the changes were saved. */
   async function save(): Promise<boolean> {
     if (!canSave) return false;
     saving = true;
     try {
-      await api.updateItem(initial.id, patch);
+      const sent = patch;
+      const updated = await api.updateItem(initial.id, sent);
+      const inverse = inversePatch(sent);
+      store.record(
+        `edit “${updated.title}”`,
+        () => api.updateItem(initial.id, inverse, updated),
+        () => api.updateItem(initial.id, sent, updated),
+      );
       store.toast("Saved", "info");
       await store.refresh();
       close(true);

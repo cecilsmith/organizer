@@ -412,6 +412,31 @@ impl App {
         Ok((item, sources))
     }
 
+    /// Like `item`, but falls back to a copy supplied by the UI. Undo needs this:
+    /// by the time you undo a completion, a sync may have dropped the item.
+    fn item_or(&self, id: &str, fallback: Option<Item>) -> Result<Item> {
+        match self.item(id) {
+            Ok((item, _)) => Ok(item),
+            Err(e) => fallback.filter(|f| f.id == id).ok_or(e),
+        }
+    }
+
+    /// Re-caches an item that no source currently holds, so it shows again
+    /// right away instead of after the next sync.
+    fn ensure_cached(&self, item: &Item) -> Result<()> {
+        if !self.db.item_copies(&item.id)?.is_empty() {
+            return Ok(());
+        }
+        let source = if item.kind == ItemKind::Reminder {
+            REMINDERS_SOURCE.to_string()
+        } else if self.db.repos()?.iter().any(|r| r.id == item.container_id) {
+            item.container_id.clone()
+        } else {
+            item.project_ids.first().cloned().unwrap_or_else(|| item.container_id.clone())
+        };
+        self.db.put_item(&source, item)
+    }
+
     /// Applies `f` to every cached copy of an item.
     fn update_cached(&self, id: &str, f: impl Fn(&mut Item)) -> Result<()> {
         for (src, mut it) in self.db.item_copies(id)? {
@@ -477,8 +502,8 @@ impl App {
         Ok(item)
     }
 
-    pub async fn set_completed(&self, id: &str, completed: bool) -> Result<()> {
-        let (item, _) = self.item(id)?;
+    pub async fn set_completed(&self, id: &str, completed: bool, fallback: Option<Item>) -> Result<()> {
+        let item = self.item_or(id, fallback)?;
         match item.kind {
             ItemKind::Reminder => {
                 let raw = id.trim_start_matches("rem:").to_string();
@@ -496,14 +521,39 @@ impl App {
                 if completed {
                     self.gh.archive_project_item(&account.host, &token, &item.container_id, pitem).await?;
                 } else {
-                    return Err(Error::msg("archived drafts can be restored from the project on GitHub"));
+                    self.gh.unarchive_project_item(&account.host, &token, &item.container_id, pitem).await?;
                 }
             }
             ItemKind::PullRequest => {
                 return Err(Error::msg("pull requests are merged or closed on GitHub"));
             }
         }
+        if !completed {
+            self.ensure_cached(&Item { completed: false, ..item })?;
+        }
         self.update_cached(id, |i| i.completed = completed)
+    }
+
+    /// Undoes creating an item. A reminder is deleted; a GitHub issue is closed
+    /// as "not planned" (deleting issues needs admin rights).
+    pub async fn discard_item(&self, id: &str) -> Result<()> {
+        let (item, _) = self.item(id)?;
+        match item.kind {
+            ItemKind::Reminder => {
+                self.reminders.remove(id.trim_start_matches("rem:").to_string()).await?;
+                self.db.remove_item(id)?;
+            }
+            ItemKind::Issue => {
+                let (account, token) = self.account_token(item.account_id.as_deref().unwrap_or_default())?;
+                let (owner, name, number) =
+                    item.repo_and_number().ok_or_else(|| Error::msg("issue is missing its repository"))?;
+                self.gh.close_not_planned(&account.host, &token, owner, name, number).await?;
+                self.db.remove_item(id)?;
+            }
+            _ => return Err(Error::msg("only new reminders and issues can be undone")),
+        }
+        self.changed();
+        Ok(())
     }
 
     /// Moves an item to another category tab. For GitHub this swaps category
@@ -618,8 +668,8 @@ impl App {
         Ok(details)
     }
 
-    pub async fn update_item(&self, id: &str, patch: ItemPatch) -> Result<Item> {
-        let (item, _) = self.item(id)?;
+    pub async fn update_item(&self, id: &str, patch: ItemPatch, fallback: Option<Item>) -> Result<Item> {
+        let item = self.item_or(id, fallback)?;
         if patch.title.as_deref().is_some_and(|t| t.trim().is_empty()) {
             return Err(Error::msg("the title can't be empty"));
         }
@@ -669,14 +719,18 @@ impl App {
                     .update_issue(&account.host, &token, owner, name, number, fields.into())
                     .await?;
                 let body = github::cached_body(issue.body.as_deref());
-                self.update_cached(id, |i| {
+                let apply = |i: &mut Item| {
                     i.title = issue.title.clone();
                     i.body = body.clone();
                     i.labels = issue.labels.clone();
                     i.assignees = issue.assignees.clone();
                     i.updated_at = Some(issue.updated_at.clone());
-                })?;
-                self.item(id)?.0
+                };
+                let mut updated = item.clone();
+                apply(&mut updated);
+                self.ensure_cached(&updated)?;
+                self.update_cached(id, apply)?;
+                updated
             }
             ItemKind::DraftIssue => {
                 let (account, token) = self.account_token(item.account_id.as_deref().unwrap_or_default())?;
@@ -686,11 +740,15 @@ impl App {
                 let body = patch.body.unwrap_or(old_body);
                 self.gh.update_draft(&account.host, &token, &draft_id, &title, &body).await?;
                 let cached = github::cached_body(Some(&body));
-                self.update_cached(id, |i| {
+                let apply = |i: &mut Item| {
                     i.title = title.clone();
                     i.body = cached.clone();
-                })?;
-                self.item(id)?.0
+                };
+                let mut updated = item.clone();
+                apply(&mut updated);
+                self.ensure_cached(&updated)?;
+                self.update_cached(id, apply)?;
+                updated
             }
         };
         self.changed();

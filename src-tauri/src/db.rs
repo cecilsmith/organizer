@@ -333,6 +333,11 @@ impl Db {
         Ok(())
     }
 
+    pub fn remove_item(&self, id: &str) -> Result<()> {
+        self.conn().execute("DELETE FROM items WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
     /// Every cached copy of an item, keyed by the source that produced it.
     pub fn item_copies(&self, id: &str) -> Result<Vec<(String, Item)>> {
         let conn = self.conn();

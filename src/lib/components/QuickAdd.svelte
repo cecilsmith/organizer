@@ -95,7 +95,21 @@
         };
     try {
       const item = await api.createItem(req);
-      store.toast(`Added “${item.title}” to ${item.containerName}`, "info");
+      // Undo deletes a new reminder, so redo recreates it (with a new id). Undo
+      // closes a new issue as "not planned", so redo just reopens it.
+      let currentId = item.id;
+      const entry = store.record(
+        `add “${item.title}”`,
+        () => api.discardItem(currentId),
+        async () => {
+          if (item.kind === "reminder") currentId = (await api.createItem(req)).id;
+          else await api.setCompleted(currentId, false, item);
+        },
+      );
+      store.toast(`Added “${item.title}” to ${item.containerName}`, "info", {
+        label: "Undo",
+        run: () => store.undo(entry),
+      });
       reset();
       await store.refresh();
     } catch (e) {

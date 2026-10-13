@@ -53,6 +53,7 @@ pub fn run() {
             commands::delete_category,
             commands::create_item,
             commands::set_completed,
+            commands::discard_item,
             commands::set_category,
             commands::item_details,
             commands::update_item,

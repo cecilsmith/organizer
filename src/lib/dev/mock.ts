@@ -85,6 +85,10 @@ export function installMock() {
           if (it) it.completed = a.completed as boolean;
           return null;
         }
+        case "discard_item": {
+          snap.items = snap.items.filter((i) => i.id !== a.id);
+          return null;
+        }
         case "set_category": {
           const it = snap.items.find((i) => i.id === a.id);
           if (it) it.categories = a.category ? [a.category as string] : [];

@@ -110,8 +110,13 @@ pub async fn create_item(app: S<'_>, item: NewItem) -> Result<Item> {
 }
 
 #[tauri::command]
-pub async fn set_completed(app: S<'_>, id: String, completed: bool) -> Result<()> {
-    app.set_completed(&id, completed).await
+pub async fn set_completed(app: S<'_>, id: String, completed: bool, fallback: Option<Item>) -> Result<()> {
+    app.set_completed(&id, completed, fallback).await
+}
+
+#[tauri::command]
+pub async fn discard_item(app: S<'_>, id: String) -> Result<()> {
+    app.discard_item(&id).await
 }
 
 #[tauri::command]
@@ -125,8 +130,8 @@ pub async fn item_details(app: S<'_>, id: String) -> Result<ItemDetails> {
 }
 
 #[tauri::command]
-pub async fn update_item(app: S<'_>, id: String, patch: ItemPatch) -> Result<Item> {
-    app.update_item(&id, patch).await
+pub async fn update_item(app: S<'_>, id: String, patch: ItemPatch, fallback: Option<Item>) -> Result<Item> {
+    app.update_item(&id, patch, fallback).await
 }
 
 #[tauri::command]
