@@ -188,3 +188,32 @@ pub struct Candidate {
     pub url: String,
     pub description: Option<String>,
 }
+
+/// Edits from the item editor. Absent fields are left alone; an empty string
+/// clears `body` or `due`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemPatch {
+    pub title: Option<String>,
+    pub body: Option<String>,
+    /// Reminders only.
+    pub due: Option<String>,
+    /// Reminders only.
+    pub priority: Option<i64>,
+    /// Reminders only: move to another list.
+    pub list_id: Option<String>,
+    /// GitHub issues/PRs only: the complete new label set.
+    pub labels: Option<Vec<String>>,
+    /// GitHub issues/PRs only: the complete new assignee set.
+    pub assignees: Option<Vec<String>>,
+}
+
+/// Everything the editor needs: the item with its full (untruncated) body,
+/// plus choices for labels and assignees on GitHub items.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemDetails {
+    pub item: Item,
+    pub label_options: Vec<Label>,
+    pub assignee_options: Vec<String>,
+}

@@ -86,6 +86,50 @@ export function installMock() {
           if (it) it.categories = a.category ? [a.category as string] : [];
           return null;
         }
+        case "item_details": {
+          const it = snap.items.find((i) => i.id === a.id);
+          return new Promise((resolve) =>
+            setTimeout(
+              () =>
+                resolve({
+                  item: structuredClone(it),
+                  labelOptions: [
+                    { name: "bug", color: "d73a4a" },
+                    { name: "enhancement", color: "a2eeef" },
+                    { name: "writing", color: "0e8a16" },
+                    ...categories.map((c) => ({ name: c.label, color: c.color.slice(1) })),
+                  ],
+                  assigneeOptions: ["octo", "hubot", "monalisa"],
+                }),
+              300,
+            ),
+          );
+        }
+        case "update_item": {
+          const it = snap.items.find((i) => i.id === a.id);
+          const p = a.patch as Record<string, unknown>;
+          if (!it) throw "item not found";
+          if (typeof p.title === "string") it.title = p.title;
+          if (typeof p.body === "string") it.body = p.body || null;
+          if (typeof p.due === "string") it.due = p.due || null;
+          if (typeof p.priority === "number") it.priority = p.priority;
+          if (typeof p.listId === "string") {
+            const list = snap.reminderLists.find((l) => l.id === p.listId)!;
+            it.containerId = list.id;
+            it.containerName = list.title;
+          }
+          if (Array.isArray(p.labels)) it.labels = p.labels.map((name: string) => ({ name, color: "ededed" }));
+          if (Array.isArray(p.assignees)) it.assignees = p.assignees as string[];
+          // Re-derive areas the way the backend would.
+          const tags = it.kind === "reminder"
+            ? [...`${it.title} ${it.body ?? ""}`.matchAll(/(?:^|\s)#([\w:-]+)/g)].map((m) => m[1].toLowerCase())
+            : it.labels.map((l) => l.name.toLowerCase());
+          const fromTags = categories.filter((c) => tags.includes(c.label)).map((c) => c.id);
+          const listDefault = snap.reminderLists.find((l) => l.id === it.containerId)?.defaultCategory;
+          const repoDefault = snap.repos.find((r) => r.id === it.containerId)?.defaultCategory;
+          it.categories = fromTags.length ? fromTags : [listDefault ?? repoDefault].filter(Boolean) as string[];
+          return structuredClone(it);
+        }
         case "create_item": {
           const req = a.item as { target: string; title: string; listId?: string; repoId?: string; category?: string };
           const list = snap.reminderLists.find((l) => l.id === req.listId);

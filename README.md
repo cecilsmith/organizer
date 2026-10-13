@@ -5,6 +5,7 @@ A macOS app that puts your Apple Reminders and GitHub work in one list, sorted i
 - **Apple Reminders:** reads and writes your reminders directly through EventKit. Changes you make in the Reminders app show up here right away.
 - **GitHub:** link several accounts (github.com or Enterprise), then track any number of repositories (open issues) and Projects (issues, PRs and drafts, with their Status).
 - **Areas from labels:** an item goes into an area when it has that area's label. On GitHub that's an issue label like `school`. In Reminders it's a hashtag like `#school` in the title or notes. Anything without a label falls back to the default area of its list, repo or project. Items with no area at all go to the **Inbox**.
+- **Edit in place:** double-click any item (or select it and press Enter) to edit it in a side panel. For reminders you can change the title, notes, list, due date, time and priority. For issues and PRs you can change the title, description, labels and assignees, and for project drafts the title and body. Changing the area edits the right thing underneath: GitHub labels, or a reminder's list or hashtag.
 - **Create anywhere:** the quick-add bar creates a reminder in any list, or a GitHub issue in any tracked repo. A GitHub issue gets the current area's label and can also be added to a project.
 
 ## Architecture
@@ -71,7 +72,10 @@ Open **Settings** (⌘,).
 | ⌘F / `/` | Search (`#123` matches an issue number) |
 | ↑ ↓ / `j` `k` | Move selection |
 | Space / `x` | Complete or uncomplete |
-| Enter / `o` | Open in Reminders or on GitHub |
+| Enter / `e` / double-click | Edit |
+| `o` | Open in Reminders or on GitHub |
+| ⌘S / ⌘Enter | Save (in the editor) |
+| Esc | Close the editor (press twice to discard changes) |
 | `m` | Move to area |
 | ⌘R | Sync now |
 

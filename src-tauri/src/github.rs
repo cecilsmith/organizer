@@ -121,8 +121,23 @@ impl GitHub {
         path: &[&str],
         body: Option<Value>,
     ) -> Result<Value> {
+        self.rest_query(method, host, token, path, &[], body).await
+    }
+
+    async fn rest_query(
+        &self,
+        method: reqwest::Method,
+        host: &str,
+        token: &str,
+        path: &[&str],
+        query: &[(&str, &str)],
+        body: Option<Value>,
+    ) -> Result<Value> {
         let mut url = reqwest::Url::parse(&rest_url(host)).map_err(|e| Error::msg(e.to_string()))?;
         url.path_segments_mut().map_err(|_| Error::msg("bad URL"))?.extend(path);
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query);
+        }
         let mut req = self
             .http
             .request(method, url)
@@ -488,6 +503,104 @@ impl GitHub {
             r => r.map(|_| ()),
         }
     }
+
+    // ---- editing ----------------------------------------------------------
+
+    /// The full issue (or PR), without the body truncation applied to the cache.
+    pub async fn issue(&self, host: &str, token: &str, owner: &str, name: &str, number: i64) -> Result<IssueDetails> {
+        let n = number.to_string();
+        let v = self
+            .rest(reqwest::Method::GET, host, token, &["repos", owner, name, "issues", &n], None)
+            .await?;
+        Ok(serde_json::from_value::<RestIssue>(v)?.into())
+    }
+
+    pub async fn repo_labels(&self, host: &str, token: &str, owner: &str, name: &str) -> Result<Vec<Label>> {
+        let v = self
+            .rest_query(reqwest::Method::GET, host, token, &["repos", owner, name, "labels"], &[("per_page", "100")], None)
+            .await?;
+        let labels: Vec<RestLabel> = serde_json::from_value(v)?;
+        Ok(labels.into_iter().map(|l| Label { name: l.name, color: l.color }).collect())
+    }
+
+    pub async fn repo_assignees(&self, host: &str, token: &str, owner: &str, name: &str) -> Result<Vec<String>> {
+        let v = self
+            .rest_query(
+                reqwest::Method::GET,
+                host,
+                token,
+                &["repos", owner, name, "assignees"],
+                &[("per_page", "100")],
+                None,
+            )
+            .await?;
+        let users: Vec<RestUser> = serde_json::from_value(v)?;
+        Ok(users.into_iter().map(|u| u.login).collect())
+    }
+
+    /// Patches an issue or PR. `fields` holds only what changed (title, body, labels, assignees).
+    pub async fn update_issue(
+        &self,
+        host: &str,
+        token: &str,
+        owner: &str,
+        name: &str,
+        number: i64,
+        fields: Value,
+    ) -> Result<IssueDetails> {
+        let n = number.to_string();
+        let v = self
+            .rest(reqwest::Method::PATCH, host, token, &["repos", owner, name, "issues", &n], Some(fields))
+            .await?;
+        Ok(serde_json::from_value::<RestIssue>(v)?.into())
+    }
+
+    /// Resolves a project item to its draft issue: `(draft id, title, body)`.
+    pub async fn draft_issue(&self, host: &str, token: &str, project_item_id: &str) -> Result<(String, String, String)> {
+        let data = self
+            .graphql(
+                host,
+                token,
+                "query($id: ID!) { node(id: $id) { ... on ProjectV2Item { content { ... on DraftIssue { id title body } } } } }",
+                json!({ "id": project_item_id }),
+            )
+            .await?;
+        let c = &data["node"]["content"];
+        let id = c["id"].as_str().ok_or_else(|| Error::GitHub("draft issue not found".into()))?;
+        Ok((id.into(), str_of(&c["title"]), str_of(&c["body"])))
+    }
+
+    pub async fn update_draft(&self, host: &str, token: &str, draft_id: &str, title: &str, body: &str) -> Result<()> {
+        self.graphql(
+            host,
+            token,
+            "mutation($id: ID!, $t: String!, $b: String!) { updateProjectV2DraftIssue(input: { draftIssueId: $id, title: $t, body: $b }) { draftIssue { id } } }",
+            json!({ "id": draft_id, "t": title, "b": body }),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+/// An issue as returned by REST, with its untruncated body.
+pub struct IssueDetails {
+    pub title: String,
+    pub body: Option<String>,
+    pub labels: Vec<Label>,
+    pub assignees: Vec<String>,
+    pub updated_at: String,
+}
+
+impl From<RestIssue> for IssueDetails {
+    fn from(r: RestIssue) -> Self {
+        Self {
+            title: r.title,
+            body: r.body.filter(|b| !b.trim().is_empty()),
+            labels: r.labels.into_iter().map(|l| Label { name: l.name, color: l.color }).collect(),
+            assignees: r.assignees.into_iter().map(|a| a.login).collect(),
+            updated_at: r.updated_at,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -518,6 +631,11 @@ struct RestUser {
 
 fn str_of(v: &Value) -> String {
     v.as_str().unwrap_or_default().to_string()
+}
+
+/// Trims and caps a body for the cache.
+pub fn cached_body(body: Option<&str>) -> Option<String> {
+    body_of(&Value::String(body?.to_string()))
 }
 
 fn body_of(v: &Value) -> Option<String> {

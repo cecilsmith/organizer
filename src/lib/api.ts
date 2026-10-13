@@ -125,6 +125,23 @@ export type NewItem =
       assignSelf?: boolean;
     };
 
+/** Editor changes; omitted fields are left alone, "" clears `body`/`due`. */
+export interface ItemPatch {
+  title?: string;
+  body?: string;
+  due?: string;
+  priority?: number;
+  listId?: string;
+  labels?: string[];
+  assignees?: string[];
+}
+
+export interface ItemDetails {
+  item: Item;
+  labelOptions: Label[];
+  assigneeOptions: string[];
+}
+
 export const api = {
   snapshot: () => invoke<Snapshot>("get_snapshot"),
   syncNow: () => invoke<void>("sync_now"),
@@ -154,6 +171,8 @@ export const api = {
   createItem: (item: NewItem) => invoke<Item>("create_item", { item }),
   setCompleted: (id: string, completed: boolean) => invoke<void>("set_completed", { id, completed }),
   setCategory: (id: string, category: string | null) => invoke<void>("set_category", { id, category }),
+  itemDetails: (id: string) => invoke<ItemDetails>("item_details", { id }),
+  updateItem: (id: string, patch: ItemPatch) => invoke<Item>("update_item", { id, patch }),
   openItem: (id: string) => invoke<void>("open_item", { id }),
   openUrl: (url: string) => invoke<void>("open_url", { url }),
 };

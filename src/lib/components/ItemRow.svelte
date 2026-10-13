@@ -51,7 +51,7 @@
     onselect();
     if (item.body) expanded = !expanded;
   }}
-  ondblclick={() => store.open(item)}
+  ondblclick={() => store.edit(item)}
   onkeydown={() => {}}
 >
   {#if canComplete}
@@ -108,6 +108,16 @@
   </div>
 
   <div class="actions">
+    <button
+      class="icon-btn"
+      title="Edit (↵)"
+      onclick={(e) => {
+        e.stopPropagation();
+        store.edit(item);
+      }}
+    >
+      <Icon name="pencil" />
+    </button>
     <div class="menu-wrap">
       <button
         class="icon-btn"
@@ -137,7 +147,7 @@
     </div>
     <button
       class="icon-btn"
-      title={item.kind === "reminder" ? "Open in Reminders" : "Open on GitHub"}
+      title={item.kind === "reminder" ? "Open in Reminders (O)" : "Open on GitHub (O)"}
       onclick={(e) => {
         e.stopPropagation();
         store.open(item);

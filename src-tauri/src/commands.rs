@@ -120,6 +120,16 @@ pub async fn set_category(app: S<'_>, id: String, category: Option<String>) -> R
 }
 
 #[tauri::command]
+pub async fn item_details(app: S<'_>, id: String) -> Result<ItemDetails> {
+    app.item_details(&id).await
+}
+
+#[tauri::command]
+pub async fn update_item(app: S<'_>, id: String, patch: ItemPatch) -> Result<Item> {
+    app.update_item(&id, patch).await
+}
+
+#[tauri::command]
 pub fn open_item(handle: tauri::AppHandle, app: S<'_>, id: String) -> Result<()> {
     let url = app.item_url(&id)?;
     open(&handle, &url)

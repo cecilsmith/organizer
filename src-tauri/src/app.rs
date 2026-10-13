@@ -12,9 +12,9 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::categorize::{Rules, hashtags};
 use crate::db::Db;
 use crate::error::{Error, Result};
-use crate::github::GitHub;
+use crate::github::{self, GitHub};
 use crate::model::*;
-use crate::reminders::{NewReminder, Reminders};
+use crate::reminders::{NewReminder, ReminderPatch, Reminders};
 use crate::secrets::{self, Secrets};
 
 const REMINDERS_SOURCE: &str = "reminders";
@@ -581,6 +581,122 @@ impl App {
         }
     }
 
+    // ---- editing ----------------------------------------------------------
+
+    /// Loads an item for the editor. GitHub bodies are fetched fresh because the
+    /// cache truncates them, and saving a truncated body would lose text.
+    pub async fn item_details(&self, id: &str) -> Result<ItemDetails> {
+        let (mut item, _) = self.item(id)?;
+        let mut details = ItemDetails { item: item.clone(), label_options: vec![], assignee_options: vec![] };
+        match item.kind {
+            ItemKind::Reminder => {}
+            ItemKind::Issue | ItemKind::PullRequest => {
+                let (account, token) = self.account_token(item.account_id.as_deref().unwrap_or_default())?;
+                let (owner, name, number) =
+                    item.repo_and_number().ok_or_else(|| Error::msg("issue is missing its repository"))?;
+                let (issue, labels, assignees) = futures::try_join!(
+                    self.gh.issue(&account.host, &token, owner, name, number),
+                    self.gh.repo_labels(&account.host, &token, owner, name),
+                    self.gh.repo_assignees(&account.host, &token, owner, name),
+                )?;
+                item.title = issue.title;
+                item.body = issue.body;
+                item.labels = issue.labels;
+                item.assignees = issue.assignees;
+                details.label_options = labels;
+                details.assignee_options = assignees;
+                details.item = item;
+            }
+            ItemKind::DraftIssue => {
+                let (account, token) = self.account_token(item.account_id.as_deref().unwrap_or_default())?;
+                let (_, title, body) = self.gh.draft_issue(&account.host, &token, id.trim_start_matches("ghpi:")).await?;
+                item.title = title;
+                item.body = Some(body).filter(|b| !b.trim().is_empty());
+                details.item = item;
+            }
+        }
+        Ok(details)
+    }
+
+    pub async fn update_item(&self, id: &str, patch: ItemPatch) -> Result<Item> {
+        let (item, _) = self.item(id)?;
+        if patch.title.as_deref().is_some_and(|t| t.trim().is_empty()) {
+            return Err(Error::msg("the title can't be empty"));
+        }
+        let title = patch.title.map(|t| t.trim().to_string());
+        let updated = match item.kind {
+            ItemKind::Reminder => {
+                let raw = id.trim_start_matches("rem:").to_string();
+                let clear_empty = |v: String| Some(v).filter(|v| !v.trim().is_empty());
+                let updated = self
+                    .reminders
+                    .update(
+                        raw,
+                        ReminderPatch {
+                            title,
+                            notes: patch.body.map(clear_empty),
+                            due: patch.due.map(clear_empty),
+                            priority: patch.priority,
+                            list_id: patch.list_id,
+                        },
+                    )
+                    .await?;
+                self.db.put_item(REMINDERS_SOURCE, &updated)?;
+                updated
+            }
+            ItemKind::Issue | ItemKind::PullRequest => {
+                let (account, token) = self.account_token(item.account_id.as_deref().unwrap_or_default())?;
+                let (owner, name, number) =
+                    item.repo_and_number().ok_or_else(|| Error::msg("issue is missing its repository"))?;
+                let mut fields = serde_json::Map::new();
+                if let Some(t) = title {
+                    fields.insert("title".into(), t.into());
+                }
+                if let Some(b) = patch.body {
+                    fields.insert("body".into(), b.into());
+                }
+                if let Some(l) = patch.labels {
+                    fields.insert("labels".into(), l.into());
+                }
+                if let Some(a) = patch.assignees {
+                    fields.insert("assignees".into(), a.into());
+                }
+                if fields.is_empty() {
+                    return Ok(item);
+                }
+                let issue = self
+                    .gh
+                    .update_issue(&account.host, &token, owner, name, number, fields.into())
+                    .await?;
+                let body = github::cached_body(issue.body.as_deref());
+                self.update_cached(id, |i| {
+                    i.title = issue.title.clone();
+                    i.body = body.clone();
+                    i.labels = issue.labels.clone();
+                    i.assignees = issue.assignees.clone();
+                    i.updated_at = Some(issue.updated_at.clone());
+                })?;
+                self.item(id)?.0
+            }
+            ItemKind::DraftIssue => {
+                let (account, token) = self.account_token(item.account_id.as_deref().unwrap_or_default())?;
+                let (draft_id, old_title, old_body) =
+                    self.gh.draft_issue(&account.host, &token, id.trim_start_matches("ghpi:")).await?;
+                let title = title.unwrap_or(old_title);
+                let body = patch.body.unwrap_or(old_body);
+                self.gh.update_draft(&account.host, &token, &draft_id, &title, &body).await?;
+                let cached = github::cached_body(Some(&body));
+                self.update_cached(id, |i| {
+                    i.title = title.clone();
+                    i.body = cached.clone();
+                })?;
+                self.item(id)?.0
+            }
+        };
+        self.changed();
+        Ok(updated)
+    }
+
     pub fn item_url(&self, id: &str) -> Result<String> {
         let (item, _) = self.item(id)?;
         match item.kind {
@@ -770,6 +886,17 @@ mod tests {
             Some(("acme".into(), 4))
         );
         assert_eq!(parse_project_spec("https://github.com/users/me/projects/2"), Some(("me".into(), 2)));
+    }
+
+    #[test]
+    fn item_patch_reads_camel_case_and_omits_missing_fields() {
+        let p: ItemPatch =
+            serde_json::from_str(r#"{"title":"New","due":"","listId":"L2","labels":["bug","school"]}"#).unwrap();
+        assert_eq!(p.title.as_deref(), Some("New"));
+        assert_eq!(p.due.as_deref(), Some(""));
+        assert_eq!(p.list_id.as_deref(), Some("L2"));
+        assert_eq!(p.labels.unwrap(), vec!["bug", "school"]);
+        assert!(p.body.is_none() && p.priority.is_none() && p.assignees.is_none());
     }
 
     #[test]

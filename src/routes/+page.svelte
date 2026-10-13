@@ -4,6 +4,7 @@
   import { store, dueBucket, type DueBucket, type GroupBy, type SourceFilter } from "$lib/store.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import ItemRow from "$lib/components/ItemRow.svelte";
+  import EditPanel from "$lib/components/EditPanel.svelte";
   import QuickAdd from "$lib/components/QuickAdd.svelte";
   import Settings from "$lib/components/Settings.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -98,6 +99,8 @@
   }
 
   function onkeydown(e: KeyboardEvent) {
+    // The editor panel handles its own keys.
+    if (store.editing) return;
     const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
     if (e.metaKey) {
       const n = Number(e.key);
@@ -141,6 +144,12 @@
         }
         break;
       case "Enter":
+      case "e":
+        if (selected) {
+          e.preventDefault();
+          store.edit(selected);
+        }
+        break;
       case "o":
         if (selected) store.open(selected);
         break;
@@ -275,6 +284,12 @@
 
 {#if store.settingsOpen}
   <Settings />
+{/if}
+
+{#if store.editing}
+  {#key store.editing.id}
+    <EditPanel item={store.editing} />
+  {/key}
 {/if}
 
 <div class="toasts">

@@ -37,6 +37,8 @@ class Store {
   /** Item whose "move to area" menu is open. */
   menuFor = $state<string | null>(null);
   selectedId = $state<string | null>(null);
+  /** Item open in the editor panel. */
+  editing = $state<Item | null>(null);
 
   /** Optimistic state, keyed by item id, layered over the snapshot. */
   private overrides = $state<Record<string, Partial<Item>>>({});
@@ -216,6 +218,12 @@ class Store {
         }
       }, 1500);
     }
+  }
+
+  edit(item: Item) {
+    this.menuFor = null;
+    this.selectedId = item.id;
+    this.editing = item;
   }
 
   open(item: Item) {

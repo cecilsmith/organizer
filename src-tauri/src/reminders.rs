@@ -18,6 +18,18 @@ pub struct NewReminder {
     pub priority: i64,
 }
 
+/// Fields to change on an existing reminder; `None` leaves a field alone.
+#[derive(Default)]
+pub struct ReminderPatch {
+    pub title: Option<String>,
+    /// `Some(None)` clears the notes.
+    pub notes: Option<Option<String>>,
+    /// `Some(None)` removes the due date (and its alerts).
+    pub due: Option<Option<String>>,
+    pub priority: Option<i64>,
+    pub list_id: Option<String>,
+}
+
 #[cfg(target_os = "macos")]
 pub use mac::Reminders;
 
@@ -219,24 +231,49 @@ mod mac {
                         r.setNotes(Some(&NSString::from_str(n)));
                     }
                     r.setPriority(new.priority.clamp(0, 9) as usize);
-                    if let Some((date, time)) = due {
-                        let comps = NSDateComponents::new();
-                        comps.setYear(date.year() as isize);
-                        comps.setMonth(date.month() as isize);
-                        comps.setDay(date.day() as isize);
-                        if let Some(t) = time {
-                            comps.setHour(t.hour() as isize);
-                            comps.setMinute(t.minute() as isize);
-                            // Timed reminders only notify if they carry an alarm.
-                            if let Some(at) = NSCalendar::currentCalendar().dateFromComponents(&comps) {
-                                r.addAlarm(&EKAlarm::alarmWithAbsoluteDate(&at));
-                            }
-                        }
-                        r.setDueDateComponents(Some(&comps));
+                    if due.is_some() {
+                        set_due(&r, due);
                     }
                     s.ek.saveReminder_commit_error(&r, true).map_err(ns_err)?;
                     Ok(to_item(&r))
                 })();
+                let _ = reply.send(res);
+            })
+            .await
+        }
+
+        pub async fn update(&self, id: String, patch: ReminderPatch) -> Result<Item> {
+            let due = match &patch.due {
+                Some(Some(d)) => Some(Some(parse_due(d)?)),
+                Some(None) => Some(None),
+                None => None,
+            };
+            self.exec(move |s, reply| {
+                let res = find(s, &id).and_then(|r| unsafe {
+                    if let Some(list_id) = &patch.list_id {
+                        let cal = s
+                            .ek
+                            .calendarWithIdentifier(&NSString::from_str(list_id))
+                            .ok_or_else(|| Error::Reminders("that list no longer exists".into()))?;
+                        r.setCalendar(Some(&cal));
+                    }
+                    if let Some(t) = &patch.title {
+                        r.setTitle(Some(&NSString::from_str(t)));
+                    }
+                    if let Some(n) = &patch.notes {
+                        r.setNotes(n.as_deref().filter(|n| !n.trim().is_empty()).map(NSString::from_str).as_deref());
+                    }
+                    if let Some(p) = patch.priority {
+                        r.setPriority(p.clamp(0, 9) as usize);
+                    }
+                    if let Some(d) = due {
+                        // The old alerts belong to the old due date.
+                        r.setAlarms(None);
+                        set_due(&r, d);
+                    }
+                    s.ek.saveReminder_commit_error(&r, true).map_err(ns_err)?;
+                    Ok(to_item(&r))
+                });
                 let _ = reply.send(res);
             })
             .await
@@ -279,6 +316,27 @@ mod mac {
             })
             .await
         }
+    }
+
+    /// Sets (or clears) the due date. Timed reminders only notify if they carry
+    /// an alarm, so one is added at the due time.
+    unsafe fn set_due(r: &EKReminder, due: Option<(chrono::NaiveDate, Option<chrono::NaiveTime>)>) {
+        let Some((date, time)) = due else {
+            unsafe { r.setDueDateComponents(None) };
+            return;
+        };
+        let comps = NSDateComponents::new();
+        comps.setYear(date.year() as isize);
+        comps.setMonth(date.month() as isize);
+        comps.setDay(date.day() as isize);
+        if let Some(t) = time {
+            comps.setHour(t.hour() as isize);
+            comps.setMinute(t.minute() as isize);
+            if let Some(at) = NSCalendar::currentCalendar().dateFromComponents(&comps) {
+                unsafe { r.addAlarm(&EKAlarm::alarmWithAbsoluteDate(&at)) };
+            }
+        }
+        unsafe { r.setDueDateComponents(Some(&comps)) };
     }
 
     fn find(s: &Store, id: &str) -> Result<Retained<EKReminder>> {
@@ -381,6 +439,9 @@ mod other {
             unsupported()
         }
         pub async fn set_completed(&self, _: String, _: bool) -> Result<()> {
+            unsupported()
+        }
+        pub async fn update(&self, _: String, _: ReminderPatch) -> Result<Item> {
             unsupported()
         }
         pub async fn move_to_list(&self, _: String, _: String) -> Result<()> {

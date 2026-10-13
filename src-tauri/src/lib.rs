@@ -54,6 +54,8 @@ pub fn run() {
             commands::create_item,
             commands::set_completed,
             commands::set_category,
+            commands::item_details,
+            commands::update_item,
             commands::open_item,
             commands::open_url,
         ])
