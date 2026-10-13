@@ -14,6 +14,28 @@ pub struct Category {
     pub position: i64,
 }
 
+/// Which service an account, repo or issue belongs to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    #[default]
+    Github,
+    Gitlab,
+}
+
+impl Provider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Provider::Github => "github",
+            Provider::Gitlab => "gitlab",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        if s == "gitlab" { Provider::Gitlab } else { Provider::Github }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -24,6 +46,8 @@ pub struct Account {
     pub name: Option<String>,
     pub avatar_url: Option<String>,
     pub scopes: Vec<String>,
+    #[serde(default)]
+    pub provider: Provider,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +60,8 @@ pub struct Repo {
     pub name: String,
     pub url: String,
     pub default_category: Option<String>,
+    #[serde(default)]
+    pub provider: Provider,
 }
 
 impl Repo {
@@ -93,6 +119,9 @@ pub struct Item {
     /// `rem:<calendarItemIdentifier>` or `gh:<node id>`.
     pub id: String,
     pub kind: ItemKind,
+    /// For issues and PRs: GitHub or GitLab. Reminders are always `Github` (unused).
+    #[serde(default)]
+    pub provider: Provider,
     /// Reminders list id, repo node id, or project node id.
     pub container_id: String,
     pub container_name: String,
@@ -167,6 +196,64 @@ pub struct SourceStatus {
     pub syncing: bool,
 }
 
+/// One occurrence of a calendar event (iCloud, Google, Exchange… via EventKit).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarEvent {
+    /// `ev:<eventIdentifier>`, plus `@<occurrence>` for repeating events.
+    pub id: String,
+    pub event_id: String,
+    /// Unix seconds of this occurrence's original start; identifies one
+    /// occurrence of a repeating event.
+    pub occurrence: i64,
+    pub calendar_id: String,
+    pub calendar_name: String,
+    pub color: Option<String>,
+    pub title: String,
+    pub notes: Option<String>,
+    pub location: Option<String>,
+    pub url: Option<String>,
+    /// Local `YYYY-MM-DDTHH:MM`, or `YYYY-MM-DD` for all-day events.
+    pub start: String,
+    /// Timed: local end time. All-day: the last day, inclusive.
+    pub end: String,
+    pub all_day: bool,
+    pub recurring: bool,
+    pub writable: bool,
+    #[serde(default)]
+    pub categories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewEvent {
+    pub calendar_id: String,
+    pub title: String,
+    pub start: String,
+    pub end: String,
+    #[serde(default)]
+    pub all_day: bool,
+    pub location: Option<String>,
+    pub notes: Option<String>,
+    pub category: Option<String>,
+}
+
+/// Edits to an event; absent fields are left alone. Repeating events change
+/// only the given occurrence.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventPatch {
+    pub title: Option<String>,
+    /// `""` clears.
+    pub notes: Option<String>,
+    /// `""` clears.
+    pub location: Option<String>,
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub all_day: Option<bool>,
+    pub calendar_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
@@ -176,6 +263,9 @@ pub struct Snapshot {
     pub projects: Vec<Project>,
     pub reminder_lists: Vec<ReminderList>,
     pub reminders_access: String,
+    pub event_calendars: Vec<ReminderList>,
+    pub calendar_access: String,
+    pub events: Vec<CalendarEvent>,
     pub items: Vec<Item>,
     pub sources: Vec<SourceStatus>,
 }

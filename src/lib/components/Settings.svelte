@@ -6,10 +6,11 @@
   import SourcePicker from "./SourcePicker.svelte";
 
   const sections = [
-    { id: "accounts", name: "GitHub accounts", icon: "github" },
+    { id: "accounts", name: "Accounts", icon: "github" },
     { id: "repos", name: "Repositories", icon: "issue" },
     { id: "projects", name: "Projects", icon: "stack" },
     { id: "reminders", name: "Apple Reminders", icon: "list" },
+    { id: "calendars", name: "Calendars", icon: "calendar" },
     { id: "categories", name: "Areas", icon: "tag" },
     { id: "display", name: "Display", icon: "eye" },
     { id: "status", name: "Sync status", icon: "sync" },
@@ -42,8 +43,27 @@
   async function link() {
     linking = true;
     try {
-      const a = await api.addAccount(token, host);
+      const a = await api.addAccount(token, host, "github");
       token = "";
+      store.toast(`Linked ${a.id}`, "info");
+    } catch (e) {
+      store.toast(errorText(e));
+    } finally {
+      linking = false;
+    }
+  }
+
+  // ---- GitLab
+  let glToken = $state("");
+  let glHost = $state("gitlab.com");
+  const glTokenUrl = $derived(
+    `https://${glHost.trim() || "gitlab.com"}/-/user_settings/personal_access_tokens?name=Organizer&scopes=api`,
+  );
+  async function linkGitLab() {
+    linking = true;
+    try {
+      const a = await api.addAccount(glToken, glHost, "gitlab");
+      glToken = "";
       store.toast(`Linked ${a.id}`, "info");
     } catch (e) {
       store.toast(errorText(e));
@@ -83,6 +103,31 @@
     }
   }
   const privacyUrl = "x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders";
+  const calendarPrivacyUrl = "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars";
+  const internetAccountsUrl = "x-apple.systempreferences:com.apple.Internet-Accounts-Settings.extension";
+
+  let requestingCalendars = $state(false);
+  async function requestCalendarAccess() {
+    requestingCalendars = true;
+    try {
+      const status = await api.requestCalendarAccess();
+      if (status !== "granted") store.toast("Calendar access wasn't granted.");
+    } catch (e) {
+      store.toast(errorText(e));
+    } finally {
+      requestingCalendars = false;
+    }
+  }
+
+  /** Calendars grouped by account (iCloud, Google, Exchange…). */
+  const calendarGroups = $derived.by(() => {
+    const groups = new Map<string, NonNullable<typeof snap>["eventCalendars"]>();
+    for (const c of snap?.eventCalendars ?? []) {
+      const key = c.sourceTitle ?? "Other";
+      groups.set(key, [...(groups.get(key) ?? []), c]);
+    }
+    return [...groups.entries()];
+  });
 
   // ---- categories
   let draft = $state<Category>({ id: "", name: "", color: "#e5484d", label: "", position: 0 });
@@ -141,17 +186,17 @@
       <button class="icon-btn close" onclick={close} title="Close (esc)"><Icon name="x" /></button>
 
       {#if store.settingsSection === "accounts"}
-        <h3>GitHub accounts</h3>
+        <h3>Accounts</h3>
         <p class="muted">
-          Link as many accounts as you like — personal, work, school, or GitHub Enterprise. Tokens are stored in your
-          macOS Keychain.
+          Link as many GitHub and GitLab accounts as you like — personal, work, school, GitHub Enterprise or a
+          self-managed GitLab. Tokens are stored in your macOS Keychain.
         </p>
         {#each snap?.accounts ?? [] as a (a.id)}
           <div class="card account">
-            {#if a.avatarUrl}<img src={a.avatarUrl} alt="" />{/if}
+            {#if a.avatarUrl}<img src={a.avatarUrl} alt="" />{:else}<Icon name={a.provider} size={22} />{/if}
             <div class="grow">
               <div><strong>{a.name ?? a.login}</strong> <span class="faint">{a.login}@{a.host}</span></div>
-              {#if a.scopes.length && !a.scopes.some((s) => s.includes("project"))}
+              {#if a.provider === "github" && a.scopes.length && !a.scopes.some((s) => s.includes("project"))}
                 <div class="warn"><Icon name="alert" size={12} /> Missing the <code>project</code> scope — Projects won't load.</div>
               {/if}
             </div>
@@ -159,14 +204,14 @@
           </div>
         {/each}
 
-        <h4>Import from the GitHub CLI</h4>
+        <h4><Icon name="github" size={14} /> GitHub — import from the GitHub CLI</h4>
         <p class="muted">Uses every account you're logged into with <code>gh auth login</code>.</p>
         <button class="btn" onclick={importGh} disabled={linking}><Icon name="github" size={14} /> Import gh accounts</button>
         {#if importReport.length}
           <ul class="report selectable">{#each importReport as line}<li>{line}</li>{/each}</ul>
         {/if}
 
-        <h4>Or paste a personal access token</h4>
+        <h4>GitHub — or paste a personal access token</h4>
         <p class="muted">
           Needs <code>repo</code> and <code>project</code> scopes.
           <button class="link" onclick={() => api.openUrl(tokenUrl)}>Create one on GitHub →</button>
@@ -176,18 +221,29 @@
           <input class="field grow" type="password" bind:value={token} placeholder="ghp_… or github_pat_…" onkeydown={(e) => e.key === "Enter" && link()} />
           <button class="btn primary" onclick={link} disabled={!token.trim() || linking}>{linking ? "Linking…" : "Link"}</button>
         </div>
+
+        <h4><Icon name="gitlab" size={14} /> GitLab — paste a personal access token</h4>
+        <p class="muted">
+          Needs the <code>api</code> scope. Works with gitlab.com or your own GitLab server.
+          <button class="link" onclick={() => api.openUrl(glTokenUrl)}>Create one on {glHost.trim() || "gitlab.com"} →</button>
+        </p>
+        <div class="row">
+          <input class="field" style="width: 150px" bind:value={glHost} placeholder="gitlab.com" title="Host (change for a self-managed GitLab)" />
+          <input class="field grow" type="password" bind:value={glToken} placeholder="glpat-…" onkeydown={(e) => e.key === "Enter" && linkGitLab()} />
+          <button class="btn primary" onclick={linkGitLab} disabled={!glToken.trim() || linking}>{linking ? "Linking…" : "Link"}</button>
+        </div>
       {:else if store.settingsSection === "repos"}
         <h3>Repositories</h3>
         <p class="muted">
-          Open issues from these repos appear in your lists. Issues labeled with an area's label (like
+          Open issues from these GitHub repos and GitLab projects appear in your lists. Issues labeled with an area's label (like
           <code>school</code>) go to that area; others use the repo's default area.
         </p>
         {#each snap?.repos ?? [] as r (r.id)}
           <div class="card">
-            <Icon name="issue" />
+            <Icon name={r.provider} />
             <div class="grow">{r.owner}/{r.name} <span class="faint">via {r.accountId}</span></div>
             <CategorySelect value={r.defaultCategory} onchange={(v) => setDefault(r.id, v)} />
-            <button class="icon-btn" class:armed={armed === `src:${r.id}`} title={armed === `src:${r.id}` ? "Click again to stop tracking" : "Stop tracking (nothing changes on GitHub)"} onclick={() => removeSource(r.id)}><Icon name="trash" /></button>
+            <button class="icon-btn" class:armed={armed === `src:${r.id}`} title={armed === `src:${r.id}` ? "Click again to stop tracking" : "Stop tracking (nothing changes on the server)"} onclick={() => removeSource(r.id)}><Icon name="trash" /></button>
           </div>
         {/each}
         <h4>Track a repository</h4>
@@ -238,10 +294,54 @@
           <p class="muted">Organizer reads and writes Reminders directly through EventKit. macOS will ask you to allow it once.</p>
           <button class="btn primary" onclick={requestAccess} disabled={requesting}>{requesting ? "Waiting for permission…" : "Connect Apple Reminders"}</button>
         {/if}
+      {:else if store.settingsSection === "calendars"}
+        <h3>Calendars</h3>
+        {#if snap?.calendarAccess === "granted"}
+          <p class="muted">
+            Events from every calendar on this Mac show in the Calendar views. Give each calendar a default area; a
+            <code>#hashtag</code> in an event's title or notes overrides it.
+          </p>
+          {#each calendarGroups as [account, cals] (account)}
+            <h4>{account}</h4>
+            {#each cals as c (c.id)}
+              <div class="card" class:off={!c.enabled}>
+                <input type="checkbox" checked={c.enabled} title="Show this calendar" onchange={(e) => api.setListEnabled(c.id, e.currentTarget.checked)} />
+                <span class="dot" style:background={c.color ?? "var(--text-3)"}></span>
+                <div class="grow">
+                  {c.title}
+                  {#if !c.writable}<span class="faint">· read-only</span>{/if}
+                </div>
+                <CategorySelect value={c.defaultCategory} onchange={(v) => setDefault(c.id, v)} />
+              </div>
+            {/each}
+          {:else}
+            <p class="faint">No calendars found.</p>
+          {/each}
+        {:else if snap?.calendarAccess === "denied" || snap?.calendarAccess === "restricted" || snap?.calendarAccess === "writeOnly"}
+          <p class="muted">Organizer doesn't have full access to your calendars. Turn it on in System Settings → Privacy & Security → Calendars, then come back.</p>
+          <button class="btn" onclick={() => api.openUrl(calendarPrivacyUrl)}>Open Privacy Settings</button>
+        {:else if snap?.calendarAccess === "unsupported"}
+          <p class="muted">Calendars are only available on macOS.</p>
+        {:else}
+          <p class="muted">
+            Organizer reads and writes events through macOS, so iCloud calendars work right away. macOS will ask you to
+            allow access once.
+          </p>
+          <button class="btn primary" onclick={requestCalendarAccess} disabled={requestingCalendars}>
+            {requestingCalendars ? "Waiting for permission…" : "Connect calendars"}
+          </button>
+        {/if}
+
+        <h4>Google, Gmail and Outlook</h4>
+        <p class="muted">
+          Add your Google or Microsoft (Outlook, Microsoft 365, Exchange) account in System Settings → Internet Accounts
+          and turn on Calendars. Its calendars then appear here — and in Apple Calendar — automatically.
+        </p>
+        <button class="btn" onclick={() => api.openUrl(internetAccountsUrl)}><Icon name="external" size={14} /> Open Internet Accounts</button>
       {:else if store.settingsSection === "categories"}
         <h3>Areas</h3>
         <p class="muted">
-          Each area is a tab. An item lands in an area when it carries the area's <strong>label</strong> — a GitHub label,
+          Each area is a tab. An item lands in an area when it carries the area's <strong>label</strong> — a GitHub or GitLab label,
           or a <code>#label</code> hashtag in a reminder — or when its list/repo/project defaults to it.
         </p>
         <div class="cats">
@@ -306,10 +406,10 @@
         </p>
       {:else if store.settingsSection === "status"}
         <h3>Sync status</h3>
-        <p class="muted">GitHub refreshes every 2 minutes and whenever you come back to the window. Reminders update live.</p>
+        <p class="muted">GitHub and GitLab refresh every 2 minutes and whenever you come back to the window. Reminders and calendars update live.</p>
         {#each snap?.sources ?? [] as s (s.sourceId)}
           <div class="card status" class:failed={s.error}>
-            <Icon name={s.sourceId === "reminders" ? "list" : "github"} />
+            <Icon name={s.sourceId === "reminders" ? "list" : s.sourceId === "calendar" ? "calendar" : s.sourceId.startsWith("gl:") ? "gitlab" : "github"} />
             <div class="grow">
               <div>{s.label}</div>
               {#if s.error}<div class="err selectable">{s.error}</div>{/if}
@@ -407,6 +507,9 @@
     font-size: 17px;
   }
   h4 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     margin: 22px 0 4px;
     font-size: 13px;
   }

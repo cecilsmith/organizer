@@ -46,6 +46,6 @@ strip = true
 block2 = "0.6.2"
 objc2 = "0.6.5"
 objc2-core-graphics = { version = "0.3.2", features = ["CGColor"] }
-objc2-event-kit = { version = "0.3.2", features = ["EKCalendar", "EKCalendarItem", "EKReminder", "EKEventStore", "EKTypes", "EKSource", "EKObject", "EKAlarm", "block2", "objc2-core-graphics"] }
+objc2-event-kit = { version = "0.3.2", features = ["EKCalendar", "EKCalendarItem", "EKReminder", "EKEvent", "EKEventStore", "EKTypes", "EKSource", "EKObject", "EKAlarm", "block2", "objc2-core-graphics"] }
 objc2-foundation = "0.3.2"
 security-framework = "3.7.0"

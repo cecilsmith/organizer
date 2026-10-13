@@ -83,3 +83,63 @@ export function weekdayNames(weekStart: number, style: "short" | "narrow" | "lon
     new Date(2023, 0, 1 + ((i + weekStart) % 7)).toLocaleDateString(undefined, { weekday: style }),
   );
 }
+
+// ---- events -------------------------------------------------------------------
+
+/** Parses `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` as a local Date. */
+export function parseLocal(s: string): Date {
+  const d = parseYmd(s);
+  const m = dueMinutes(s);
+  if (m !== null) d.setHours(Math.floor(m / 60), m % 60);
+  return d;
+}
+
+export function toLocalString(d: Date, withClock = true): string {
+  return withClock ? withTime(ymd(d), d.getHours() * 60 + d.getMinutes()) : ymd(d);
+}
+
+interface Span {
+  start: string;
+  end: string;
+  allDay: boolean;
+}
+
+/** Days an event touches. A timed event ending exactly at midnight doesn't touch that day. */
+export function eventDays(e: Span): Ymd[] {
+  const first = parseYmd(e.start);
+  let last = parseYmd(e.end);
+  if (!e.allDay && dueMinutes(e.end) === 0 && e.end.slice(0, 10) > e.start.slice(0, 10)) last = addDays(last, -1);
+  const out: Ymd[] = [];
+  for (let d = first; d <= last && out.length < 366; d = addDays(d, 1)) out.push(ymd(d));
+  return out;
+}
+
+/** The minutes of `day` a timed event covers, or null if it doesn't touch it. */
+export function segmentOn(e: Span, day: Ymd): { start: number; end: number } | null {
+  if (e.allDay) return null;
+  const dayStart = parseYmd(day).getTime();
+  const dayEnd = dayStart + 86_400_000;
+  const s = parseLocal(e.start).getTime();
+  const en = parseLocal(e.end).getTime();
+  if (en <= dayStart || s >= dayEnd) return null;
+  return {
+    start: Math.round((Math.max(s, dayStart) - dayStart) / 60_000),
+    end: Math.round((Math.min(en, dayEnd) - dayStart) / 60_000),
+  };
+}
+
+/**
+ * Where an event lands when dropped on `day`: at `minutes` (keeping its
+ * length; all-day events become an hour long), or as an all-day event when
+ * `minutes` is null (keeping how many days it spans).
+ */
+export function movedEvent(e: Span, day: Ymd, minutes: number | null): Span {
+  if (minutes === null) {
+    const days = e.allDay ? Math.round((parseYmd(e.end).getTime() - parseYmd(e.start).getTime()) / 86_400_000) : 0;
+    return { start: day, end: ymd(addDays(parseYmd(day), days)), allDay: true };
+  }
+  const length = e.allDay ? 60 : Math.max(15, Math.round((parseLocal(e.end).getTime() - parseLocal(e.start).getTime()) / 60_000));
+  const start = parseLocal(withTime(day, minutes));
+  const end = new Date(start.getTime() + length * 60_000);
+  return { start: toLocalString(start), end: toLocalString(end), allDay: false };
+}

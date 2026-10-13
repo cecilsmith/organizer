@@ -5,6 +5,7 @@
   import CategorySelect from "./CategorySelect.svelte";
   import Icon from "./Icon.svelte";
   import { hashtags, stripTags } from "$lib/tags";
+  import { providerName, sourceIcon } from "$lib/providers";
 
   let { item }: { item: Item } = $props();
 
@@ -12,7 +13,10 @@
   // svelte-ignore state_referenced_locally
   const initial = item;
   const isReminder = initial.kind === "reminder";
+  /** Issues and PRs on either GitHub or GitLab: labels and assignees apply. */
   const isGitHub = initial.kind === "issue" || initial.kind === "pullRequest";
+  const isGitLab = isGitHub && initial.provider === "gitlab";
+  const service = providerName(initial.provider);
   const isDraft = initial.kind === "draftIssue";
 
   interface Form {
@@ -116,6 +120,7 @@
       if (form.priority !== original.priority) p.priority = form.priority;
       if (form.listId !== original.listId) p.listId = form.listId;
     }
+    if (isGitLab && form.dueDate !== original.dueDate) p.due = form.dueDate;
     if (isGitHub) {
       if (!sameSet(form.labels, original.labels)) p.labels = [...form.labels];
       if (!sameSet(form.assignees, original.assignees)) p.assignees = [...form.assignees];
@@ -251,9 +256,9 @@
     discardArmed = false;
   });
 
-  const kindLabel = { reminder: "Reminder", issue: "Issue", pullRequest: "Pull request", draftIssue: "Draft issue" }[
-    initial.kind
-  ];
+  const kindLabel = isGitLab
+    ? "GitLab issue"
+    : { reminder: "Reminder", issue: "Issue", pullRequest: "Pull request", draftIssue: "Draft issue" }[initial.kind];
   const completeLabel = initial.completed
     ? "Mark as not done"
     : isReminder
@@ -274,8 +279,8 @@
     <span class="where">
       {kindLabel} · {initial.containerName}{#if initial.number}&nbsp;<span class="faint">#{initial.number}</span>{/if}
     </span>
-    <button class="icon-btn" title={isReminder ? "Open in Reminders" : "Open on GitHub"} onclick={() => store.open(initial)}>
-      <Icon name={isReminder ? "external" : "github"} />
+    <button class="icon-btn" title={isReminder ? "Open in Reminders" : `Open on ${service}`} onclick={() => store.open(initial)}>
+      <Icon name={isReminder ? "external" : sourceIcon(initial)} />
     </button>
     <button class="icon-btn" title="Close (esc)" onclick={() => close()}><Icon name="x" /></button>
   </header>
@@ -295,7 +300,7 @@
     ></textarea>
 
     {#if loadError}
-      <p class="error selectable"><Icon name="alert" size={13} /> Couldn't load the latest from GitHub: {loadError}</p>
+      <p class="error selectable"><Icon name="alert" size={13} /> Couldn't load the latest from {service}: {loadError}</p>
     {/if}
 
     <div class="fields">
@@ -345,6 +350,16 @@
               >
             {/each}
           </div>
+        </div>
+      {/if}
+
+      {#if isGitLab}
+        <span class="label">Due</span>
+        <div class="control">
+          <input type="date" class="field" bind:value={form.dueDate} disabled={!loaded} />
+          {#if form.dueDate}
+            <button class="btn ghost" onclick={() => (form.dueDate = "")}>Clear</button>
+          {/if}
         </div>
       {/if}
 
@@ -416,7 +431,7 @@
 
       {#if initial.status}
         <span class="label">Status</span>
-        <div class="control"><span class="status">{initial.status}</span><span class="faint hint">change it on GitHub</span></div>
+        <div class="control"><span class="status">{initial.status}</span><span class="faint hint">change it on {service}</span></div>
       {/if}
     </div>
 

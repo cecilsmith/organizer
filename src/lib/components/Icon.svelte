@@ -11,6 +11,7 @@
     external: "M9 2.5h4.5V7M13.5 2.5 7.5 8.5M12 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3",
     gantt: "M2.5 3.5h6M5.5 8h8M3.5 12.5h5",
     eye: "M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8zM8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4z",
+    gitlab: "M8 14.4 1.7 9.8a.6.6 0 0 1-.2-.7l.9-2.6 1.5-4.6a.3.3 0 0 1 .6 0l1.5 4.6h4l1.5-4.6a.3.3 0 0 1 .6 0l1.5 4.6.9 2.6a.6.6 0 0 1-.2.7z",
     pencil: "M10.5 3 13 5.5 5.5 13H3v-2.5zM9 4.5 11.5 7",
     tag: "M2.5 2.5h5l6 6-5 5-6-6zM5.5 5.5h.01",
     check: "M3.5 8.5 6.5 11.5 12.5 4.5",
@@ -47,8 +48,8 @@
   stroke-linejoin="round"
   aria-hidden="true"
 >
-  {#if name === "github"}
-    <path d={paths.github} fill="currentColor" stroke="none" />
+  {#if name === "github" || name === "gitlab"}
+    <path d={paths[name]} fill="currentColor" stroke="none" />
   {:else}
     <path d={paths[name] ?? ""} />
   {/if}

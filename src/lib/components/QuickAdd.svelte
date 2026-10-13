@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, errorText, type NewItem } from "$lib/api";
+  import { api, errorText, type NewEvent, type NewItem } from "$lib/api";
   import { store, todayStr } from "$lib/store.svelte";
   import Icon from "./Icon.svelte";
 
@@ -12,6 +12,10 @@
   let priority = $state(0);
   let projectId = $state("");
   let assignSelf = $state(false);
+  // Events only
+  let endTime = $state("");
+  let allDay = $state(false);
+  let location = $state("");
   let busy = $state(false);
   let expanded = $state(false);
 
@@ -20,7 +24,12 @@
   const categoryName = $derived(store.categories.find((c) => c.id === category)?.name);
   const lists = $derived(snap?.reminderLists.filter((l) => l.enabled && l.writable) ?? []);
   const repos = $derived(snap?.repos ?? []);
-  const hasTargets = $derived(lists.length + repos.length > 0);
+  const githubRepos = $derived(repos.filter((r) => r.provider !== "gitlab"));
+  const gitlabRepos = $derived(repos.filter((r) => r.provider === "gitlab"));
+  const calendars = $derived(
+    snap?.calendarAccess === "granted" ? snap.eventCalendars.filter((c) => c.enabled && c.writable) : [],
+  );
+  const hasTargets = $derived(lists.length + repos.length + calendars.length > 0);
 
   // Remember the last target per tab; otherwise prefer a source mapped to this area.
   const targetKey = $derived(`organizer.target.${store.tab}`);
@@ -29,7 +38,9 @@
   function isValid(t: string | null | undefined): t is string {
     if (!t) return false;
     const [kind, id] = [t.slice(0, t.indexOf(":")), t.slice(t.indexOf(":") + 1)];
-    return kind === "rem" ? lists.some((l) => l.id === id) : repos.some((r) => r.id === id);
+    if (kind === "rem") return lists.some((l) => l.id === id);
+    if (kind === "cal") return calendars.some((c) => c.id === id);
+    return repos.some((r) => r.id === id);
   }
 
   const target = $derived.by(() => {
@@ -46,10 +57,12 @@
     if (category && repo) return `repo:${repo.id}`;
     if (lists[0]) return `rem:${lists[0].id}`;
     if (repos[0]) return `repo:${repos[0].id}`;
+    if (calendars[0]) return `cal:${calendars[0].id}`;
     return "";
   });
 
   const isReminder = $derived(target.startsWith("rem:"));
+  const isEvent = $derived(target.startsWith("cal:"));
   const targetId = $derived(target.slice(target.indexOf(":") + 1));
   const repo = $derived(repos.find((r) => r.id === targetId));
   const projects = $derived(snap?.projects.filter((p) => repo && p.accountId === repo.accountId) ?? []);
@@ -69,8 +82,15 @@
     due = preset.slice(0, 10);
     time = preset.length > 10 ? preset.slice(11, 16) : "";
     expanded = true;
-    // Dates only apply to reminders; switch away from a GitHub target.
-    if (!isReminder && lists[0]) pick(`rem:${lists[0].id}`);
+    if (isEvent) {
+      // A day becomes an all-day event; a time slot becomes a one-hour event.
+      allDay = !time;
+      endTime = time ? plusHour(time) : "";
+    } else if (!isReminder) {
+      // GitHub issues have no dates; switch to a reminder list.
+      if (lists[0]) pick(`rem:${lists[0].id}`);
+      else if (calendars[0]) pick(`cal:${calendars[0].id}`);
+    }
     inputEl?.focus();
   });
 
@@ -79,14 +99,68 @@
     notes = "";
     due = "";
     time = "";
+    endTime = "";
+    allDay = false;
+    location = "";
     priority = 0;
     expanded = false;
+  }
+
+  function plusHour(t: string) {
+    const [h, m] = t.split(":").map(Number);
+    const total = Math.min(h * 60 + m + 60, 23 * 60 + 59);
+    return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+  }
+
+  /** The next whole hour, for a new event with no time picked yet. */
+  function nextHour() {
+    const h = Math.min(new Date().getHours() + 1, 23);
+    return `${String(h).padStart(2, "0")}:00`;
+  }
+
+  async function submitEvent(t: string) {
+    const day = due || todayStr();
+    const start = allDay ? day : `${day}T${time || nextHour()}`;
+    const end = allDay ? day : `${day}T${endTime || plusHour(time || nextHour())}`;
+    const req: NewEvent = {
+      calendarId: targetId,
+      title: t,
+      start,
+      end,
+      allDay,
+      location: location || null,
+      notes: notes || null,
+      category,
+    };
+    const ev = await api.createEvent(req);
+    // Undo deletes the event; redo creates it again (with a new id).
+    let current = ev;
+    const entry = store.record(
+      `add “${ev.title}”`,
+      () => api.deleteEvent(current.id, current),
+      async () => {
+        current = await api.createEvent(req);
+      },
+    );
+    store.toast(`Added “${ev.title}” to ${ev.calendarName}`, "info", { label: "Undo", run: () => store.undo(entry) });
   }
 
   async function submit() {
     const t = title.trim();
     if (!t || busy || !target) return;
     busy = true;
+    if (isEvent) {
+      try {
+        await submitEvent(t);
+        reset();
+        await store.refresh();
+      } catch (e) {
+        store.toast(errorText(e));
+      } finally {
+        busy = false;
+      }
+      return;
+    }
     const req: NewItem = isReminder
       ? {
           target: "reminder",
@@ -152,7 +226,7 @@
         bind:this={inputEl}
         bind:value={title}
         class="title"
-        placeholder={categoryName ? `New ${categoryName.toLowerCase()} to-do…` : "New to-do…"}
+        placeholder={isEvent ? "New event…" : categoryName ? `New ${categoryName.toLowerCase()} to-do…` : "New to-do…"}
         disabled={busy}
         spellcheck="true"
       />
@@ -164,9 +238,23 @@
             {/each}
           </optgroup>
         {/if}
-        {#if repos.length}
+        {#if calendars.length}
+          <optgroup label="Calendar event in…">
+            {#each calendars as c (c.id)}
+              <option value={`cal:${c.id}`}>{c.title}{c.sourceTitle ? ` (${c.sourceTitle})` : ""}</option>
+            {/each}
+          </optgroup>
+        {/if}
+        {#if githubRepos.length}
           <optgroup label="GitHub issue in…">
-            {#each repos as r (r.id)}
+            {#each githubRepos as r (r.id)}
+              <option value={`repo:${r.id}`}>{r.owner}/{r.name}</option>
+            {/each}
+          </optgroup>
+        {/if}
+        {#if gitlabRepos.length}
+          <optgroup label="GitLab issue in…">
+            {#each gitlabRepos as r (r.id)}
               <option value={`repo:${r.id}`}>{r.owner}/{r.name}</option>
             {/each}
           </optgroup>
@@ -183,11 +271,35 @@
           class="field"
           rows="2"
           bind:value={notes}
-          placeholder={isReminder ? "Notes" : "Issue description (Markdown)"}
+          placeholder={isReminder || isEvent ? "Notes" : "Issue description (Markdown)"}
           onfocus={() => (expanded = true)}
         ></textarea>
         <div class="opts">
-          {#if isReminder}
+          {#if isEvent}
+            <input type="date" class="field" value={due || todayStr()} oninput={(e) => (due = e.currentTarget.value)} />
+            <label class="check"><input type="checkbox" bind:checked={allDay} /> All day</label>
+            {#if !allDay}
+              <input
+                type="time"
+                class="field"
+                value={time || nextHour()}
+                oninput={(e) => {
+                  time = e.currentTarget.value;
+                  endTime = plusHour(time);
+                }}
+                title="Starts"
+              />
+              <span class="faint">to</span>
+              <input
+                type="time"
+                class="field"
+                value={endTime || plusHour(time || nextHour())}
+                oninput={(e) => (endTime = e.currentTarget.value)}
+                title="Ends"
+              />
+            {/if}
+            <input class="field" bind:value={location} placeholder="Location" />
+          {:else if isReminder}
             <div class="chips">
               <button class:on={!due} onclick={() => (due = "")}>No date</button>
               <button class:on={due === todayStr()} onclick={() => (due = todayStr())}>Today</button>
@@ -223,9 +335,9 @@
   </div>
 {:else if store.snap}
   <div class="quick empty">
-    <span class="muted">Connect Apple Reminders or a GitHub repo to start adding to-dos.</span>
+    <span class="muted">Connect Apple Reminders, your calendars, or a GitHub or GitLab project to start adding things.</span>
     <button class="btn" onclick={() => store.openSettings("reminders")}>Connect Reminders</button>
-    <button class="btn" onclick={() => store.openSettings("accounts")}><Icon name="github" size={14} /> Link GitHub</button>
+    <button class="btn" onclick={() => store.openSettings("accounts")}><Icon name="github" size={14} /> Link GitHub or GitLab</button>
   </div>
 {/if}
 

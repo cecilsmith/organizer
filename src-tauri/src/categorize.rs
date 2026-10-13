@@ -72,6 +72,25 @@ impl Rules {
     }
 }
 
+impl Rules {
+    /// Events work like reminders: `#tags` in the title or notes, else the
+    /// calendar's default area.
+    pub fn categorize_event(&self, e: &crate::model::CalendarEvent) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for tag in [Some(e.title.as_str()), e.notes.as_deref()].into_iter().flatten().flat_map(hashtags) {
+            if let Some(id) = self.tags.get(&tag)
+                && !out.contains(id)
+            {
+                out.push(id.clone());
+            }
+        }
+        if out.is_empty() {
+            out.extend(self.defaults.get(&e.calendar_id).cloned());
+        }
+        out
+    }
+}
+
 /// Lowercased `#tags` in free text. A tag is `#` followed by word characters,
 /// `-` or `:`, and must start the text or follow whitespace (so URLs with
 /// fragments don't count).
@@ -108,12 +127,13 @@ pub fn default_categories() -> Vec<Category> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Label;
+    use crate::model::{Label, Provider};
 
     fn item(kind: ItemKind, container: &str) -> Item {
         Item {
             id: "x".into(),
             kind,
+            provider: Provider::Github,
             container_id: container.into(),
             container_name: "c".into(),
             account_id: None,
@@ -192,6 +212,31 @@ mod tests {
     fn uncategorized_is_empty() {
         assert!(rules().categorize(&item(ItemKind::Reminder, "list-none")).is_empty());
         assert!(rules().categorize(&item(ItemKind::Issue, "unknown")).is_empty());
+    }
+
+    #[test]
+    fn events_use_hashtags_then_calendar_default() {
+        let mut e = crate::model::CalendarEvent {
+            id: "ev:1".into(),
+            event_id: "1".into(),
+            occurrence: 0,
+            calendar_id: "list-school".into(),
+            calendar_name: "Classes".into(),
+            color: None,
+            title: "Lecture".into(),
+            notes: None,
+            location: None,
+            url: None,
+            start: "2026-10-12T10:00".into(),
+            end: "2026-10-12T11:00".into(),
+            all_day: false,
+            recurring: false,
+            writable: true,
+            categories: vec![],
+        };
+        assert_eq!(rules().categorize_event(&e), vec!["school"]);
+        e.notes = Some("bring snacks #fun".into());
+        assert_eq!(rules().categorize_event(&e), vec!["fun"]);
     }
 
     #[test]

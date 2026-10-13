@@ -4,6 +4,7 @@
   import { addDays, parseYmd, ymd } from "$lib/dates";
   import { store, dueBucket, type GanttGroup, type GanttZoom } from "$lib/store.svelte";
   import Icon from "../Icon.svelte";
+  import { sourceIcon } from "$lib/providers";
 
   const LABEL_W = 260;
   const ROW_H = 30;
@@ -67,7 +68,7 @@
         // Project work groups by project — that's what a roadmap is organized around.
         const pid = it.projectIds[0] ?? (it.kind === "draftIssue" ? it.containerId : undefined);
         const title = pid ? (projectTitles.get(pid) ?? it.containerName) : it.containerName;
-        g = add(pid ? `proj:${pid}` : `repo:${it.containerName}`, () => ({ title, color: null, icon: pid ? "stack" : "github" }), it);
+        g = add(pid ? `proj:${pid}` : `repo:${it.provider}:${it.containerName}`, () => ({ title, color: null, icon: pid ? "stack" : sourceIcon(it) }), it);
       }
       const list = members.get(g.key) ?? [];
       list.push(it);

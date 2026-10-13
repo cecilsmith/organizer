@@ -24,9 +24,14 @@ pub async fn sync_now(app: S<'_>) -> Result<()> {
 }
 
 #[tauri::command]
-pub async fn add_account(app: S<'_>, token: String, host: Option<String>) -> Result<Account> {
-    let account = app.add_account(&token, host.as_deref().unwrap_or("github.com")).await?;
-    Ok(account)
+pub async fn add_account(
+    app: S<'_>,
+    token: String,
+    host: Option<String>,
+    provider: Option<Provider>,
+) -> Result<Account> {
+    let provider = provider.unwrap_or_default();
+    app.add_account(&token, host.as_deref().unwrap_or_default(), provider).await
 }
 
 #[tauri::command]
@@ -87,6 +92,37 @@ pub fn set_default_category(app: S<'_>, container_id: String, category: Option<S
 #[tauri::command]
 pub async fn request_reminders_access(app: S<'_>) -> Result<String> {
     app.request_reminders_access().await
+}
+
+#[tauri::command]
+pub async fn request_calendar_access(app: S<'_>) -> Result<String> {
+    app.request_calendar_access().await
+}
+
+#[tauri::command]
+pub async fn create_event(app: S<'_>, event: NewEvent) -> Result<CalendarEvent> {
+    app.create_event(event).await
+}
+
+#[tauri::command]
+pub async fn update_event(
+    app: S<'_>,
+    id: String,
+    patch: EventPatch,
+    fallback: Option<CalendarEvent>,
+) -> Result<CalendarEvent> {
+    app.update_event(&id, patch, fallback).await
+}
+
+#[tauri::command]
+pub async fn delete_event(app: S<'_>, id: String, fallback: Option<CalendarEvent>) -> Result<()> {
+    app.delete_event(&id, fallback).await
+}
+
+#[tauri::command]
+pub fn open_event(handle: tauri::AppHandle, app: S<'_>, id: String) -> Result<()> {
+    let url = app.event_url(&id)?;
+    open(&handle, &url)
 }
 
 #[tauri::command]
@@ -157,7 +193,7 @@ pub fn open_url(handle: tauri::AppHandle, url: String) -> Result<()> {
 }
 
 fn open(handle: &tauri::AppHandle, url: &str) -> Result<()> {
-    let allowed = ["https://", "x-apple-reminderkit://", "x-apple.systempreferences:"];
+    let allowed = ["https://", "x-apple-reminderkit://", "x-apple.systempreferences:", "ical://"];
     if !allowed.iter().any(|p| url.starts_with(p)) {
         return Err(crate::error::Error::msg("refusing to open that link"));
     }

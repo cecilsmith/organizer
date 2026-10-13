@@ -1,5 +1,13 @@
 import { listen } from "@tauri-apps/api/event";
-import { api, errorText, type Item, type ItemPatch, type Snapshot } from "./api";
+import {
+  api,
+  errorText,
+  type CalendarEvent,
+  type EventPatch,
+  type Item,
+  type ItemPatch,
+  type Snapshot,
+} from "./api";
 import { addDays, addMonths, parseYmd, ymd } from "./dates";
 
 export type SourceFilter = "all" | "reminders" | "github";
@@ -45,6 +53,7 @@ interface Prefs {
   showUnscheduled: boolean;
   ganttZoom: GanttZoom;
   ganttGroup: GanttGroup;
+  showEvents: boolean;
 }
 
 function loadPrefs(): Partial<Prefs> {
@@ -71,6 +80,10 @@ class Store {
   showUnscheduled = $state(true);
   ganttZoom = $state<GanttZoom>("week");
   ganttGroup = $state<GanttGroup>("source");
+  /** Show calendar events in the Calendar views. */
+  showEvents = $state(true);
+  /** Event open in the event editor. */
+  editingEvent = $state<CalendarEvent | null>(null);
   /** Set to prefill the quick-add due date (`YYYY-MM-DD` or with `THH:MM`). */
   quickAddDue = $state<string | null>(null);
   settingsOpen = $state(false);
@@ -109,6 +122,7 @@ class Store {
     if (typeof p.showUnscheduled === "boolean") this.showUnscheduled = p.showUnscheduled;
     if (p.ganttZoom) this.ganttZoom = p.ganttZoom;
     if (p.ganttGroup) this.ganttGroup = p.ganttGroup;
+    if (typeof p.showEvents === "boolean") this.showEvents = p.showEvents;
     if (p.sourceFilter) this.sourceFilter = p.sourceFilter;
   }
 
@@ -127,6 +141,7 @@ class Store {
           showUnscheduled: this.showUnscheduled,
           ganttZoom: this.ganttZoom,
           ganttGroup: this.ganttGroup,
+          showEvents: this.showEvents,
         } satisfies Prefs),
       );
     } catch {
@@ -211,11 +226,33 @@ class Store {
     return c;
   });
 
+  /** Optimistic event edits (drag/resize), layered over the snapshot. */
+  private eventOverrides = $state<Record<string, Partial<CalendarEvent>>>({});
+
+  /**
+   * Events for the Calendar views: the current area tab and search apply;
+   * the Reminders/GitHub source filters hide them.
+   */
+  visibleEvents: CalendarEvent[] = $derived.by(() => {
+    if (!this.showEvents || this.sourceFilter !== "all") return [];
+    const q = this.query.trim().toLowerCase();
+    return (this.snap?.events ?? [])
+      .map((e) => (this.eventOverrides[e.id] ? { ...e, ...this.eventOverrides[e.id] } : e))
+      .filter((e) => this.inTab(e, this.tab))
+      .filter(
+        (e) =>
+          !q ||
+          q.split(/\s+/).every((t) =>
+            [e.title, e.location, e.notes, e.calendarName].some((f) => f?.toLowerCase().includes(t)),
+          ),
+      );
+  });
+
   visible: Item[] = $derived.by(() =>
     this.items.filter((it) => this.inTab(it, this.tab) && this.matches(it)).sort(compareItems),
   );
 
-  inTab(item: Item, tab: string) {
+  inTab(item: { categories: string[] }, tab: string) {
     if (tab === "all") return true;
     if (tab === "inbox") return item.categories.length === 0;
     return item.categories.includes(tab);
@@ -394,6 +431,8 @@ class Store {
   canReschedule(item: Item, which: "start" | "due" = "due"): boolean {
     if (item.completed) return false;
     if (item.kind === "reminder") return which === "due";
+    // GitLab issues have their own due date (but no start date).
+    if (item.provider === "gitlab") return which === "due" && item.kind === "issue";
     const pd = item.projectDates;
     return !!pd && !!(which === "start" ? pd.startField : pd.dueField);
   }
@@ -442,6 +481,52 @@ class Store {
         delete o.due;
         if (Object.keys(o).length === 0) delete this.overrides[item.id];
       }
+    }
+  }
+
+  editEvent(e: CalendarEvent) {
+    this.menuFor = null;
+    this.selectedId = e.id;
+    this.editingEvent = e;
+  }
+
+  openEvent(e: CalendarEvent) {
+    api.openEvent(e.id).catch((err) => this.toast(errorText(err)));
+  }
+
+  /** Edits an event (drag, resize, or the editor), with undo. Returns false on failure. */
+  async updateEvent(e: CalendarEvent, patch: EventPatch, label = `edit “${e.title}”`): Promise<boolean> {
+    // The inverse restores each changed field to its old value.
+    const inverse: EventPatch = {};
+    if (patch.title !== undefined) inverse.title = e.title;
+    if (patch.notes !== undefined) inverse.notes = e.notes ?? "";
+    if (patch.location !== undefined) inverse.location = e.location ?? "";
+    if (patch.calendarId !== undefined) inverse.calendarId = e.calendarId;
+    if (patch.start !== undefined || patch.end !== undefined || patch.allDay !== undefined) {
+      inverse.start = e.start;
+      inverse.end = e.end;
+      inverse.allDay = e.allDay;
+    }
+    const optimistic: Partial<CalendarEvent> = {};
+    if (patch.start !== undefined) optimistic.start = patch.start;
+    if (patch.end !== undefined) optimistic.end = patch.end;
+    if (patch.allDay !== undefined) optimistic.allDay = patch.allDay;
+    if (patch.title !== undefined) optimistic.title = patch.title;
+    this.eventOverrides[e.id] = optimistic;
+    try {
+      const updated = await api.updateEvent(e.id, patch, e);
+      this.record(
+        label,
+        () => api.updateEvent(updated.id, inverse, updated),
+        () => api.updateEvent(e.id, patch, e),
+      );
+      await this.refresh();
+      return true;
+    } catch (err) {
+      this.toast(errorText(err));
+      return false;
+    } finally {
+      delete this.eventOverrides[e.id];
     }
   }
 

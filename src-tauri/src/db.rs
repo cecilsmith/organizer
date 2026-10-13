@@ -14,6 +14,21 @@ pub struct Db {
     conn: Mutex<Connection>,
 }
 
+#[derive(Clone, Copy)]
+enum ListKind {
+    Reminders,
+    Events,
+}
+
+impl ListKind {
+    fn table(self) -> &'static str {
+        match self {
+            ListKind::Reminders => "reminder_lists",
+            ListKind::Events => "event_calendars",
+        }
+    }
+}
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS categories (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL,
@@ -43,10 +58,33 @@ CREATE TABLE IF NOT EXISTS items (
     source_id TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL,
     PRIMARY KEY (source_id, id)
 );
+-- Calendars that hold events; same shape as reminder_lists.
+CREATE TABLE IF NOT EXISTS event_calendars (
+    id TEXT PRIMARY KEY, title TEXT NOT NULL, color TEXT, source_title TEXT,
+    writable INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1,
+    default_category TEXT, present INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY, data TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sync_state (
     source_id TEXT PRIMARY KEY, last_synced TEXT, error TEXT
 );
 "#;
+
+/// Adds columns introduced after a database was first created.
+fn migrate(conn: &Connection) -> Result<()> {
+    let has_column = |table: &str, column: &str| -> Result<bool> {
+        let mut st = conn.prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"))?;
+        Ok(st.exists([column])?)
+    };
+    for table in ["accounts", "repos"] {
+        if !has_column(table, "provider")? {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN provider TEXT NOT NULL DEFAULT 'github'"))?;
+        }
+    }
+    Ok(())
+}
 
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {
@@ -55,6 +93,7 @@ impl Db {
             "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
         )?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         let db = Self { conn: Mutex::new(conn) };
         db.seed()?;
         Ok(db)
@@ -65,6 +104,7 @@ impl Db {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         let db = Self { conn: Mutex::new(conn) };
         db.seed()?;
         Ok(db)
@@ -116,7 +156,7 @@ impl Db {
     pub fn delete_category(&self, id: &str) -> Result<()> {
         let conn = self.conn();
         conn.execute("DELETE FROM categories WHERE id = ?1", [id])?;
-        for table in ["repos", "projects", "reminder_lists"] {
+        for table in ["repos", "projects", "reminder_lists", "event_calendars"] {
             conn.execute(
                 &format!("UPDATE {table} SET default_category = NULL WHERE default_category = ?1"),
                 [id],
@@ -130,7 +170,7 @@ impl Db {
     pub fn accounts(&self) -> Result<Vec<Account>> {
         let conn = self.conn();
         let mut st = conn.prepare_cached(
-            "SELECT id, login, host, name, avatar_url, scopes FROM accounts ORDER BY login",
+            "SELECT id, login, host, name, avatar_url, scopes, provider FROM accounts ORDER BY provider, login",
         )?;
         let rows = st.query_map([], |r| {
             let scopes: String = r.get(5)?;
@@ -141,6 +181,7 @@ impl Db {
                 name: r.get(3)?,
                 avatar_url: r.get(4)?,
                 scopes: scopes.split(',').filter(|s| !s.is_empty()).map(Into::into).collect(),
+                provider: Provider::parse(&r.get::<_, String>(6)?),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -152,9 +193,9 @@ impl Db {
 
     pub fn upsert_account(&self, a: &Account) -> Result<()> {
         self.conn().execute(
-            "INSERT INTO accounts (id, login, host, name, avatar_url, scopes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(id) DO UPDATE SET name = ?4, avatar_url = ?5, scopes = ?6",
-            params![a.id, a.login, a.host, a.name, a.avatar_url, a.scopes.join(",")],
+            "INSERT INTO accounts (id, login, host, name, avatar_url, scopes, provider) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET name = ?4, avatar_url = ?5, scopes = ?6, provider = ?7",
+            params![a.id, a.login, a.host, a.name, a.avatar_url, a.scopes.join(","), a.provider.as_str()],
         )?;
         Ok(())
     }
@@ -178,7 +219,7 @@ impl Db {
     pub fn repos(&self) -> Result<Vec<Repo>> {
         let conn = self.conn();
         let mut st = conn.prepare_cached(
-            "SELECT id, account_id, owner, name, url, default_category FROM repos ORDER BY owner, name",
+            "SELECT id, account_id, owner, name, url, default_category, provider FROM repos ORDER BY owner, name",
         )?;
         let rows = st.query_map([], |r| {
             Ok(Repo {
@@ -188,6 +229,7 @@ impl Db {
                 name: r.get(3)?,
                 url: r.get(4)?,
                 default_category: r.get(5)?,
+                provider: Provider::parse(&r.get::<_, String>(6)?),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -195,9 +237,9 @@ impl Db {
 
     pub fn upsert_repo(&self, r: &Repo) -> Result<()> {
         self.conn().execute(
-            "INSERT INTO repos (id, account_id, owner, name, url, default_category) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(id) DO UPDATE SET account_id = ?2, owner = ?3, name = ?4, url = ?5, default_category = ?6",
-            params![r.id, r.account_id, r.owner, r.name, r.url, r.default_category],
+            "INSERT INTO repos (id, account_id, owner, name, url, default_category, provider) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET account_id = ?2, owner = ?3, name = ?4, url = ?5, default_category = ?6, provider = ?7",
+            params![r.id, r.account_id, r.owner, r.name, r.url, r.default_category, r.provider.as_str()],
         )?;
         Ok(())
     }
@@ -246,7 +288,7 @@ impl Db {
 
     pub fn set_default_category(&self, container_id: &str, category: Option<&str>) -> Result<()> {
         let conn = self.conn();
-        for table in ["repos", "projects", "reminder_lists"] {
+        for table in ["repos", "projects", "reminder_lists", "event_calendars"] {
             conn.execute(
                 &format!("UPDATE {table} SET default_category = ?2 WHERE id = ?1"),
                 params![container_id, category],
@@ -258,11 +300,20 @@ impl Db {
     // ---- reminder lists ---------------------------------------------------
 
     pub fn reminder_lists(&self) -> Result<Vec<ReminderList>> {
+        self.lists(ListKind::Reminders)
+    }
+
+    pub fn event_calendars(&self) -> Result<Vec<ReminderList>> {
+        self.lists(ListKind::Events)
+    }
+
+    fn lists(&self, kind: ListKind) -> Result<Vec<ReminderList>> {
         let conn = self.conn();
-        let mut st = conn.prepare_cached(
+        let mut st = conn.prepare_cached(&format!(
             "SELECT id, title, color, source_title, writable, enabled, default_category
-             FROM reminder_lists WHERE present = 1 ORDER BY source_title, title",
-        )?;
+             FROM {} WHERE present = 1 ORDER BY source_title, title",
+            kind.table()
+        ))?;
         let rows = st.query_map([], |r| {
             Ok(ReminderList {
                 id: r.get(0)?,
@@ -277,18 +328,29 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    pub fn sync_reminder_lists(&self, lists: &[ReminderList]) -> Result<()> {
+        self.sync_lists(ListKind::Reminders, lists)
+    }
+
+    pub fn sync_event_calendars(&self, lists: &[ReminderList]) -> Result<()> {
+        self.sync_lists(ListKind::Events, lists)
+    }
+
     /// Records the lists EventKit currently reports, keeping user settings for
     /// lists we've seen before. Lists that disappeared are hidden, not deleted,
     /// so their category mapping survives a temporary iCloud hiccup.
-    pub fn sync_reminder_lists(&self, lists: &[ReminderList]) -> Result<()> {
+    fn sync_lists(&self, kind: ListKind, lists: &[ReminderList]) -> Result<()> {
+        let table = kind.table();
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        tx.execute("UPDATE reminder_lists SET present = 0", [])?;
+        tx.execute(&format!("UPDATE {table} SET present = 0"), [])?;
         for l in lists {
             tx.execute(
-                "INSERT INTO reminder_lists (id, title, color, source_title, writable, present)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 1)
-                 ON CONFLICT(id) DO UPDATE SET title = ?2, color = ?3, source_title = ?4, writable = ?5, present = 1",
+                &format!(
+                    "INSERT INTO {table} (id, title, color, source_title, writable, present)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 1)
+                     ON CONFLICT(id) DO UPDATE SET title = ?2, color = ?3, source_title = ?4, writable = ?5, present = 1"
+                ),
                 params![l.id, l.title, l.color, l.source_title, l.writable],
             )?;
         }
@@ -296,10 +358,68 @@ impl Db {
         Ok(())
     }
 
+    /// Shows or hides a Reminders list or event calendar (ids don't overlap).
     pub fn set_list_enabled(&self, id: &str, enabled: bool) -> Result<()> {
-        self.conn()
-            .execute("UPDATE reminder_lists SET enabled = ?2 WHERE id = ?1", params![id, enabled])?;
+        let conn = self.conn();
+        for table in ["reminder_lists", "event_calendars"] {
+            conn.execute(&format!("UPDATE {table} SET enabled = ?2 WHERE id = ?1"), params![id, enabled])?;
+        }
         Ok(())
+    }
+
+    // ---- events -----------------------------------------------------------
+
+    pub fn replace_events(&self, events: &[CalendarEvent]) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM events", [])?;
+        {
+            let mut st = tx.prepare_cached("INSERT OR REPLACE INTO events (id, data) VALUES (?1, ?2)")?;
+            for e in events {
+                st.execute(params![e.id, serde_json::to_string(e)?])?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO sync_state (source_id, last_synced, error) VALUES ('calendar', ?1, NULL)
+             ON CONFLICT(source_id) DO UPDATE SET last_synced = ?1, error = NULL",
+            params![chrono::Utc::now().to_rfc3339()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn put_event(&self, e: &CalendarEvent) -> Result<()> {
+        self.conn().execute(
+            "INSERT OR REPLACE INTO events (id, data) VALUES (?1, ?2)",
+            params![e.id, serde_json::to_string(e)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_event(&self, id: &str) -> Result<()> {
+        self.conn().execute("DELETE FROM events WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn event(&self, id: &str) -> Result<Option<CalendarEvent>> {
+        let data: Option<String> = self
+            .conn()
+            .query_row("SELECT data FROM events WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?;
+        Ok(data.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+
+    pub fn events(&self) -> Result<Vec<CalendarEvent>> {
+        let conn = self.conn();
+        let mut st = conn.prepare_cached("SELECT data FROM events")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Ok(e) = serde_json::from_str(&row?) {
+                out.push(e);
+            }
+        }
+        Ok(out)
     }
 
     // ---- items ------------------------------------------------------------
@@ -398,6 +518,7 @@ mod tests {
         Item {
             id: id.into(),
             kind: ItemKind::Issue,
+            provider: Provider::Github,
             container_id: repo.into(),
             container_name: "o/r".into(),
             account_id: Some("me@github.com".into()),
@@ -439,6 +560,7 @@ mod tests {
             name: None,
             avatar_url: None,
             scopes: vec!["repo".into()],
+            provider: Provider::Github,
         };
         db.upsert_account(&acct).unwrap();
         db.upsert_repo(&Repo {
@@ -448,6 +570,7 @@ mod tests {
             name: "r".into(),
             url: "".into(),
             default_category: Some("school".into()),
+            provider: Provider::Github,
         })
         .unwrap();
         db.replace_items("R1", &[issue("gh:1", "R1"), issue("gh:2", "R1")]).unwrap();
@@ -459,6 +582,25 @@ mod tests {
         let left = db.all_items().unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].1.id, "rem:1");
+    }
+
+    #[test]
+    fn migrates_old_databases_to_have_providers() {
+        let conn = Connection::open_in_memory().unwrap();
+        // An accounts/repos table from before GitLab support.
+        conn.execute_batch(
+            "CREATE TABLE accounts (id TEXT PRIMARY KEY, login TEXT NOT NULL, host TEXT NOT NULL,
+               name TEXT, avatar_url TEXT, scopes TEXT NOT NULL DEFAULT '');
+             CREATE TABLE repos (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, owner TEXT NOT NULL,
+               name TEXT NOT NULL, url TEXT NOT NULL, default_category TEXT);
+             INSERT INTO accounts (id, login, host) VALUES ('me@github.com', 'me', 'github.com');",
+        )
+        .unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap(); // idempotent
+        let db = Db { conn: Mutex::new(conn) };
+        assert_eq!(db.accounts().unwrap()[0].provider, Provider::Github);
     }
 
     #[test]

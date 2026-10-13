@@ -3,6 +3,7 @@
   import { store, dueBucket, formatDue } from "$lib/store.svelte";
   import Icon from "./Icon.svelte";
   import { stripTags } from "$lib/tags";
+  import { providerName, sourceIcon } from "$lib/providers";
 
   let {
     item,
@@ -178,13 +179,13 @@
     </div>
     <button
       class="icon-btn"
-      title={item.kind === "reminder" ? "Open in Reminders (O)" : "Open on GitHub (O)"}
+      title={item.kind === "reminder" ? "Open in Reminders (O)" : `Open on ${providerName(item.provider)} (O)`}
       onclick={(e) => {
         e.stopPropagation();
         store.open(item);
       }}
     >
-      <Icon name={item.kind === "reminder" ? "external" : "github"} />
+      <Icon name={item.kind === "reminder" ? "external" : sourceIcon(item)} />
     </button>
   </div>
 </div>

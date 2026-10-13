@@ -1,4 +1,6 @@
-//! Apple Reminders through EventKit, called directly from Rust (no AppleScript).
+//! Apple Reminders and calendar events through EventKit, called directly
+//! from Rust (no AppleScript). Calendars include every account added to macOS
+//! (iCloud, Google, Exchange/Microsoft 365, CalDAV).
 //!
 //! `EKEventStore` and the objects it vends aren't `Send`, so one dedicated
 //! thread owns the store and runs jobs sent to it. Each job gets a oneshot
@@ -8,7 +10,7 @@
 use tokio::sync::oneshot;
 
 use crate::error::{Error, Result};
-use crate::model::{Item, ReminderList};
+use crate::model::{CalendarEvent, EventPatch, Item, ReminderList};
 
 pub struct NewReminder {
     pub list_id: String,
@@ -50,6 +52,43 @@ fn parse_due(s: &str) -> Result<(chrono::NaiveDate, Option<chrono::NaiveTime>)> 
     Err(Error::Reminders(format!("couldn't understand due date \"{s}\"")))
 }
 
+/// Parses an event time: `YYYY-MM-DDTHH:MM` or a bare date (midnight).
+fn parse_event_time(s: &str) -> Result<chrono::NaiveDateTime> {
+    let (date, time) = parse_due(s)?;
+    Ok(date.and_time(time.unwrap_or_default()))
+}
+
+/// Start and end instants for an event. All-day events run from midnight of
+/// the first day to the last second of the last day, as EventKit stores them.
+fn event_bounds(start: &str, end: &str, all_day: bool) -> Result<(chrono::NaiveDateTime, chrono::NaiveDateTime)> {
+    let s = parse_event_time(start)?;
+    let e = parse_event_time(end)?;
+    if all_day {
+        let first = s.date();
+        let last = e.date().max(first);
+        return Ok((first.and_hms_opt(0, 0, 0).unwrap(), last.and_hms_opt(23, 59, 59).unwrap()));
+    }
+    if e <= s {
+        return Err(Error::Reminders("the event has to end after it starts".into()));
+    }
+    Ok((s, e))
+}
+
+/// Formats EventKit's start/end for the UI (see `CalendarEvent`).
+fn format_event_times(start: chrono::NaiveDateTime, end: chrono::NaiveDateTime, all_day: bool) -> (String, String) {
+    if all_day {
+        // EventKit may end an all-day event at 23:59:59 or at the next midnight.
+        let last = if end.time() == chrono::NaiveTime::MIN && end > start {
+            (end - chrono::Duration::seconds(1)).date()
+        } else {
+            end.date()
+        };
+        return (start.date().to_string(), last.max(start.date()).to_string());
+    }
+    let f = |d: chrono::NaiveDateTime| d.format("%Y-%m-%dT%H:%M").to_string();
+    (f(start), f(end))
+}
+
 #[cfg(target_os = "macos")]
 mod mac {
     use std::ptr::NonNull;
@@ -62,8 +101,8 @@ mod mac {
     use objc2::runtime::{AnyObject, Bool, ProtocolObject};
     use objc2_core_graphics::CGColor;
     use objc2_event_kit::{
-        EKAlarm, EKAuthorizationStatus, EKCalendar, EKEntityType, EKEventStore,
-        EKEventStoreChangedNotification, EKReminder,
+        EKAlarm, EKAuthorizationStatus, EKCalendar, EKEntityType, EKEvent, EKEventStore,
+        EKEventStoreChangedNotification, EKReminder, EKSpan,
     };
     use objc2_foundation::{
         NSArray, NSCalendar, NSDate, NSDateComponentUndefined, NSDateComponents, NSError,
@@ -71,7 +110,7 @@ mod mac {
     };
 
     use super::*;
-    use crate::model::ItemKind;
+    use crate::model::{ItemKind, Provider};
 
     type Job = Box<dyn FnOnce(&Store) + Send>;
 
@@ -124,18 +163,23 @@ mod mac {
         }
 
         pub fn access_status(&self) -> &'static str {
-            let st = unsafe { EKEventStore::authorizationStatusForEntityType(EKEntityType::Reminder) };
-            match st {
-                EKAuthorizationStatus::FullAccess => "granted",
-                EKAuthorizationStatus::WriteOnly => "writeOnly",
-                EKAuthorizationStatus::Denied => "denied",
-                EKAuthorizationStatus::Restricted => "restricted",
-                _ => "notDetermined",
-            }
+            status_for(EKEntityType::Reminder)
+        }
+
+        pub fn calendar_access_status(&self) -> &'static str {
+            status_for(EKEntityType::Event)
         }
 
         pub async fn request_access(&self) -> Result<bool> {
-            self.exec(|s, reply| {
+            self.request(EKEntityType::Reminder).await
+        }
+
+        pub async fn request_calendar_access(&self) -> Result<bool> {
+            self.request(EKEntityType::Event).await
+        }
+
+        async fn request(&self, kind: EKEntityType) -> Result<bool> {
+            self.exec(move |s, reply| {
                 let reply = Mutex::new(Some(reply));
                 let ek = s.ek.clone();
                 let block = RcBlock::new(move |granted: Bool, err: *mut NSError| {
@@ -152,14 +196,29 @@ mod mac {
                         let _ = r.send(res);
                     }
                 });
-                unsafe { s.ek.requestFullAccessToRemindersWithCompletion(RcBlock::as_ptr(&block)) };
+                unsafe {
+                    if kind == EKEntityType::Event {
+                        s.ek.requestFullAccessToEventsWithCompletion(RcBlock::as_ptr(&block))
+                    } else {
+                        s.ek.requestFullAccessToRemindersWithCompletion(RcBlock::as_ptr(&block))
+                    }
+                };
             })
             .await
         }
 
         pub async fn lists(&self) -> Result<Vec<ReminderList>> {
-            self.exec(|s, reply| {
-                let cals = unsafe { s.ek.calendarsForEntityType(EKEntityType::Reminder) };
+            self.calendars(EKEntityType::Reminder).await
+        }
+
+        /// Event calendars from every account macOS knows about.
+        pub async fn event_calendars(&self) -> Result<Vec<ReminderList>> {
+            self.calendars(EKEntityType::Event).await
+        }
+
+        async fn calendars(&self, kind: EKEntityType) -> Result<Vec<ReminderList>> {
+            self.exec(move |s, reply| {
+                let cals = unsafe { s.ek.calendarsForEntityType(kind) };
                 let lists = cals
                     .iter()
                     .map(|c| unsafe {
@@ -175,6 +234,126 @@ mod mac {
                     })
                     .collect();
                 let _ = reply.send(Ok(lists));
+            })
+            .await
+        }
+
+        // ---- events ---------------------------------------------------------
+
+        /// Every occurrence in the given calendars between two dates.
+        pub async fn events(
+            &self,
+            calendar_ids: Vec<String>,
+            from: chrono::NaiveDate,
+            to: chrono::NaiveDate,
+        ) -> Result<Vec<CalendarEvent>> {
+            if calendar_ids.is_empty() {
+                return Ok(vec![]);
+            }
+            self.exec(move |s, reply| {
+                let cals: Vec<Retained<EKCalendar>> = calendar_ids
+                    .iter()
+                    .filter_map(|id| unsafe { s.ek.calendarWithIdentifier(&NSString::from_str(id)) })
+                    .collect();
+                if cals.is_empty() {
+                    let _ = reply.send(Ok(vec![]));
+                    return;
+                }
+                let cals = NSArray::from_retained_slice(&cals);
+                let start = ns_date(from.and_hms_opt(0, 0, 0).unwrap());
+                let end = ns_date(to.and_hms_opt(23, 59, 59).unwrap());
+                let events = unsafe {
+                    let pred = s.ek.predicateForEventsWithStartDate_endDate_calendars(&start, &end, Some(&cals));
+                    s.ek.eventsMatchingPredicate(&pred)
+                };
+                let _ = reply.send(Ok(events.iter().filter_map(|e| to_event(&e)).collect()));
+            })
+            .await
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub async fn create_event(
+            &self,
+            calendar_id: String,
+            title: String,
+            start: String,
+            end: String,
+            all_day: bool,
+            location: Option<String>,
+            notes: Option<String>,
+        ) -> Result<CalendarEvent> {
+            let (start, end) = event_bounds(&start, &end, all_day)?;
+            self.exec(move |s, reply| {
+                let res = (|| unsafe {
+                    let cal = s
+                        .ek
+                        .calendarWithIdentifier(&NSString::from_str(&calendar_id))
+                        .ok_or_else(|| Error::Reminders("that calendar no longer exists".into()))?;
+                    let e = EKEvent::eventWithEventStore(&s.ek);
+                    e.setCalendar(Some(&cal));
+                    e.setTitle(Some(&NSString::from_str(&title)));
+                    e.setAllDay(all_day);
+                    e.setStartDate(Some(&ns_date(start)));
+                    e.setEndDate(Some(&ns_date(end)));
+                    if let Some(l) = location.as_deref().filter(|l| !l.trim().is_empty()) {
+                        e.setLocation(Some(&NSString::from_str(l)));
+                    }
+                    if let Some(n) = notes.as_deref().filter(|n| !n.trim().is_empty()) {
+                        e.setNotes(Some(&NSString::from_str(n)));
+                    }
+                    s.ek.saveEvent_span_commit_error(&e, EKSpan::ThisEvent, true).map_err(ns_err)?;
+                    to_event(&e).ok_or_else(|| Error::Reminders("the event was saved but couldn't be read back".into()))
+                })();
+                let _ = reply.send(res);
+            })
+            .await
+        }
+
+        /// Edits one occurrence (for repeating events, only that occurrence).
+        pub async fn update_event(&self, event_id: String, occurrence: i64, patch: EventPatch) -> Result<CalendarEvent> {
+            self.exec(move |s, reply| {
+                let res = find_event(s, &event_id, occurrence).and_then(|e| unsafe {
+                    if let Some(id) = &patch.calendar_id {
+                        let cal = s
+                            .ek
+                            .calendarWithIdentifier(&NSString::from_str(id))
+                            .ok_or_else(|| Error::Reminders("that calendar no longer exists".into()))?;
+                        e.setCalendar(Some(&cal));
+                    }
+                    if let Some(t) = &patch.title {
+                        e.setTitle(Some(&NSString::from_str(t)));
+                    }
+                    if let Some(n) = &patch.notes {
+                        e.setNotes(Some(n.as_str()).filter(|n| !n.trim().is_empty()).map(NSString::from_str).as_deref());
+                    }
+                    if let Some(l) = &patch.location {
+                        e.setLocation(Some(l.as_str()).filter(|l| !l.trim().is_empty()).map(NSString::from_str).as_deref());
+                    }
+                    if patch.start.is_some() || patch.end.is_some() || patch.all_day.is_some() {
+                        let current = to_event(&e).ok_or_else(|| Error::Reminders("couldn't read the event".into()))?;
+                        let all_day = patch.all_day.unwrap_or(current.all_day);
+                        let start = patch.start.clone().unwrap_or(current.start);
+                        let end = patch.end.clone().unwrap_or(current.end);
+                        let (start, end) = event_bounds(&start, &end, all_day)?;
+                        e.setAllDay(all_day);
+                        e.setStartDate(Some(&ns_date(start)));
+                        e.setEndDate(Some(&ns_date(end)));
+                    }
+                    s.ek.saveEvent_span_commit_error(&e, EKSpan::ThisEvent, true).map_err(ns_err)?;
+                    to_event(&e).ok_or_else(|| Error::Reminders("couldn't read the event".into()))
+                });
+                let _ = reply.send(res);
+            })
+            .await
+        }
+
+        /// Deletes one occurrence. Only used to undo creating an event.
+        pub async fn remove_event(&self, event_id: String, occurrence: i64) -> Result<()> {
+            self.exec(move |s, reply| {
+                let res = find_event(s, &event_id, occurrence).and_then(|e| {
+                    unsafe { s.ek.removeEvent_span_commit_error(&e, EKSpan::ThisEvent, true) }.map_err(ns_err)
+                });
+                let _ = reply.send(res);
             })
             .await
         }
@@ -349,6 +528,90 @@ mod mac {
         unsafe { r.setDueDateComponents(Some(&comps)) };
     }
 
+    fn status_for(kind: EKEntityType) -> &'static str {
+        match unsafe { EKEventStore::authorizationStatusForEntityType(kind) } {
+            EKAuthorizationStatus::FullAccess => "granted",
+            EKAuthorizationStatus::WriteOnly => "writeOnly",
+            EKAuthorizationStatus::Denied => "denied",
+            EKAuthorizationStatus::Restricted => "restricted",
+            _ => "notDetermined",
+        }
+    }
+
+    fn ns_date(dt: chrono::NaiveDateTime) -> Retained<NSDate> {
+        use chrono::TimeZone;
+        // `earliest` resolves times that occur twice when clocks fall back.
+        let local = chrono::Local
+            .from_local_datetime(&dt)
+            .earliest()
+            .unwrap_or_else(|| chrono::Local.from_utc_datetime(&dt));
+        NSDate::dateWithTimeIntervalSince1970(local.timestamp() as f64)
+    }
+
+    fn local(d: &NSDate) -> chrono::NaiveDateTime {
+        let secs = d.timeIntervalSince1970();
+        chrono::DateTime::from_timestamp(secs as i64, 0)
+            .unwrap_or_default()
+            .with_timezone(&chrono::Local)
+            .naive_local()
+    }
+
+    fn to_event(e: &EKEvent) -> Option<CalendarEvent> {
+        unsafe {
+            let event_id = e.eventIdentifier()?.to_string();
+            let start = e.startDate();
+            let occurrence = e.occurrenceDate().unwrap_or_else(|| start.clone()).timeIntervalSince1970() as i64;
+            let all_day = e.isAllDay();
+            let (start, end) = format_event_times(local(&start), local(&e.endDate()), all_day);
+            let cal = e.calendar();
+            let recurring = e.hasRecurrenceRules();
+            Some(CalendarEvent {
+                // One-off events keep the same id when moved; occurrences of a
+                // repeating event are told apart by their original start.
+                id: if recurring { format!("ev:{event_id}@{occurrence}") } else { format!("ev:{event_id}") },
+                event_id,
+                occurrence,
+                calendar_id: cal.as_ref().map(|c| c.calendarIdentifier().to_string()).unwrap_or_default(),
+                calendar_name: cal.as_ref().map(|c| c.title().to_string()).unwrap_or_default(),
+                color: cal.as_ref().and_then(|c| c.CGColor()).and_then(|c| hex_color(&c)),
+                title: e.title().to_string(),
+                notes: e.notes().map(|n| n.to_string()).filter(|n| !n.trim().is_empty()),
+                location: e.location().map(|l| l.to_string()).filter(|l| !l.trim().is_empty()),
+                url: e.URL().and_then(|u| u.absoluteString()).map(|u| u.to_string()),
+                start,
+                end,
+                all_day,
+                recurring,
+                writable: cal.as_ref().is_some_and(|c| c.allowsContentModifications()),
+                categories: vec![],
+            })
+        }
+    }
+
+    /// Finds one occurrence of an event. `eventWithIdentifier` only returns the
+    /// first occurrence of a repeating event, so search around the date.
+    fn find_event(s: &Store, event_id: &str, occurrence: i64) -> Result<Retained<EKEvent>> {
+        let not_found = || Error::Reminders("event not found — it may have been deleted".into());
+        let first = unsafe { s.ek.eventWithIdentifier(&NSString::from_str(event_id)) }.ok_or_else(not_found)?;
+        if !unsafe { first.hasRecurrenceRules() } {
+            return Ok(first);
+        }
+        let at = |secs: i64| NSDate::dateWithTimeIntervalSince1970(secs as f64);
+        let found = unsafe {
+            let cals = first.calendar().map(|c| NSArray::from_retained_slice(&[c]));
+            let pred = s.ek.predicateForEventsWithStartDate_endDate_calendars(
+                &at(occurrence - 86_400),
+                &at(occurrence + 2 * 86_400),
+                cals.as_deref(),
+            );
+            s.ek.eventsMatchingPredicate(&pred).iter().find(|e| {
+                e.eventIdentifier().is_some_and(|id| id.to_string() == event_id)
+                    && e.occurrenceDate().is_some_and(|d| (d.timeIntervalSince1970() as i64 - occurrence).abs() <= 1)
+            })
+        };
+        found.ok_or_else(not_found)
+    }
+
     fn find(s: &Store, id: &str) -> Result<Retained<EKReminder>> {
         let item = unsafe { s.ek.calendarItemWithIdentifier(&NSString::from_str(id)) }
             .ok_or_else(|| Error::Reminders("reminder not found — it may have been deleted".into()))?;
@@ -368,6 +631,7 @@ mod mac {
             Item {
                 id: format!("rem:{}", r.calendarItemIdentifier()),
                 kind: ItemKind::Reminder,
+                provider: Provider::Github,
                 container_id,
                 container_name,
                 account_id: None,
@@ -443,7 +707,38 @@ mod other {
         pub async fn request_access(&self) -> Result<bool> {
             unsupported()
         }
+        pub fn calendar_access_status(&self) -> &'static str {
+            "unsupported"
+        }
+        pub async fn request_calendar_access(&self) -> Result<bool> {
+            unsupported()
+        }
         pub async fn lists(&self) -> Result<Vec<ReminderList>> {
+            unsupported()
+        }
+        pub async fn event_calendars(&self) -> Result<Vec<ReminderList>> {
+            unsupported()
+        }
+        pub async fn events(&self, _: Vec<String>, _: chrono::NaiveDate, _: chrono::NaiveDate) -> Result<Vec<CalendarEvent>> {
+            unsupported()
+        }
+        #[allow(clippy::too_many_arguments)]
+        pub async fn create_event(
+            &self,
+            _: String,
+            _: String,
+            _: String,
+            _: String,
+            _: bool,
+            _: Option<String>,
+            _: Option<String>,
+        ) -> Result<CalendarEvent> {
+            unsupported()
+        }
+        pub async fn update_event(&self, _: String, _: i64, _: EventPatch) -> Result<CalendarEvent> {
+            unsupported()
+        }
+        pub async fn remove_event(&self, _: String, _: i64) -> Result<()> {
             unsupported()
         }
         pub async fn incomplete(&self, _: Vec<String>) -> Result<Vec<Item>> {
@@ -472,7 +767,7 @@ mod other {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_due;
+    use super::{event_bounds, format_event_times, parse_due, parse_event_time};
 
     #[test]
     fn parses_due_dates() {
@@ -482,5 +777,23 @@ mod tests {
         let (_, t) = parse_due("2026-10-12T09:30").unwrap();
         assert_eq!(t.unwrap().to_string(), "09:30:00");
         assert!(parse_due("tomorrow").is_err());
+    }
+
+    #[test]
+    fn all_day_events_span_whole_days() {
+        let (s, e) = event_bounds("2026-10-12", "2026-10-13", true).unwrap();
+        assert_eq!(s.to_string(), "2026-10-12 00:00:00");
+        assert_eq!(e.to_string(), "2026-10-13 23:59:59");
+        // Formatting back gives the inclusive last day, whichever way EventKit ends it.
+        assert_eq!(format_event_times(s, e, true), ("2026-10-12".into(), "2026-10-13".into()));
+        let next_midnight = parse_event_time("2026-10-14").unwrap();
+        assert_eq!(format_event_times(s, next_midnight, true).1, "2026-10-13");
+    }
+
+    #[test]
+    fn timed_events_must_end_after_they_start() {
+        assert!(event_bounds("2026-10-12T10:00", "2026-10-12T09:00", false).is_err());
+        let (s, e) = event_bounds("2026-10-12T10:00", "2026-10-12T11:30", false).unwrap();
+        assert_eq!(format_event_times(s, e, false), ("2026-10-12T10:00".into(), "2026-10-12T11:30".into()));
     }
 }

@@ -2,7 +2,7 @@
 // Only loaded in dev builds when the page isn't running inside Tauri.
 
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { Category, Item, Snapshot } from "$lib/api";
+import type { CalendarEvent, Category, Item, Snapshot } from "$lib/api";
 import { todayStr as day } from "$lib/store.svelte";
 
 const categories: Category[] = [
@@ -17,6 +17,7 @@ const pd = (n: string) => ({ projectId: "P1", itemId: `PVTI_${n}`, startField: "
 
 function item(p: Partial<Item> & Pick<Item, "id" | "title" | "kind">): Item {
   return {
+    provider: "github",
     containerId: "",
     containerName: "",
     accountId: null,
@@ -40,14 +41,41 @@ function item(p: Partial<Item> & Pick<Item, "id" | "title" | "kind">): Item {
   };
 }
 
+function event(p: Partial<CalendarEvent> & Pick<CalendarEvent, "id" | "title" | "calendarId" | "start" | "end">): CalendarEvent {
+  const cal = calendars.find((c) => c.id === p.calendarId)!;
+  return {
+    eventId: p.id.slice(3),
+    occurrence: 0,
+    calendarName: cal.title,
+    color: cal.color,
+    notes: null,
+    location: null,
+    url: null,
+    allDay: false,
+    recurring: false,
+    writable: cal.writable,
+    categories: cal.defaultCategory ? [cal.defaultCategory] : [],
+    ...p,
+  };
+}
+
+const calendars = [
+  { id: "C1", title: "Home", color: "#34c759", sourceTitle: "iCloud", writable: true, enabled: true, defaultCategory: "personal" },
+  { id: "C2", title: "Work", color: "#007aff", sourceTitle: "Google (sam@gmail.com)", writable: true, enabled: true, defaultCategory: "business" },
+  { id: "C3", title: "Classes", color: "#af52de", sourceTitle: "Exchange (Outlook)", writable: true, enabled: true, defaultCategory: "school" },
+  { id: "C4", title: "US Holidays", color: "#ff3b30", sourceTitle: "Other", writable: false, enabled: true, defaultCategory: null },
+];
+
 const snap: Snapshot = {
   categories,
   accounts: [
-    { id: "octo@github.com", login: "octo", host: "github.com", name: "Octo Cat", avatarUrl: null, scopes: ["repo"] },
+    { id: "octo@github.com", login: "octo", host: "github.com", name: "Octo Cat", avatarUrl: null, scopes: ["repo"], provider: "github" },
+    { id: "sam@gitlab.com", login: "sam", host: "gitlab.com", name: "Sam", avatarUrl: null, scopes: ["api"], provider: "gitlab" },
   ],
   repos: [
-    { id: "R1", accountId: "octo@github.com", owner: "octo", name: "thesis", url: "", defaultCategory: "school" },
-    { id: "R2", accountId: "octo@github.com", owner: "acme", name: "storefront", url: "", defaultCategory: "business" },
+    { id: "R1", accountId: "octo@github.com", owner: "octo", name: "thesis", url: "", defaultCategory: "school", provider: "github" },
+    { id: "R2", accountId: "octo@github.com", owner: "acme", name: "storefront", url: "", defaultCategory: "business", provider: "github" },
+    { id: "gl:gitlab.com:42", accountId: "sam@gitlab.com", owner: "robotics-club", name: "rover", url: "", defaultCategory: "fun", provider: "gitlab" },
   ],
   projects: [
     { id: "P1", accountId: "octo@github.com", owner: "acme", number: 3, title: "Q4 Roadmap", url: "", defaultCategory: "business" },
@@ -58,6 +86,17 @@ const snap: Snapshot = {
     { id: "L3", title: "Someday", color: "#34c759", sourceTitle: "iCloud", writable: true, enabled: true, defaultCategory: null },
   ],
   remindersAccess: "granted",
+  calendarAccess: "granted",
+  eventCalendars: calendars,
+  events: [
+    event({ id: "ev:E1", title: "Team standup", calendarId: "C2", start: `${day(0)}T09:00`, end: `${day(0)}T09:30`, recurring: true }),
+    event({ id: "ev:E2", title: "Lunch with Sam", calendarId: "C1", start: `${day(0)}T12:30`, end: `${day(0)}T13:30`, location: "Café Rio" }),
+    event({ id: "ev:E3", title: "EE5351 Lecture", calendarId: "C3", start: `${day(0)}T14:00`, end: `${day(0)}T15:15`, location: "Keller 3-180", recurring: true }),
+    event({ id: "ev:E4", title: "Product review", calendarId: "C2", start: `${day(1)}T15:00`, end: `${day(1)}T16:30`, location: "Room 4B", notes: "Bring the Q4 numbers" }),
+    event({ id: "ev:E5", title: "Family trip", calendarId: "C1", start: day(5), end: day(7), allDay: true }),
+    event({ id: "ev:E6", title: "Indigenous Peoples' Day", calendarId: "C4", start: day(0), end: day(0), allDay: true }),
+    event({ id: "ev:E7", title: "Office hours", calendarId: "C3", start: `${day(2)}T10:00`, end: `${day(2)}T11:00` }),
+  ],
   items: [
     item({ id: "rem:1", kind: "reminder", title: "Pick up dry cleaning", containerId: "L1", containerName: "Errands", body: "Ticket 4417, they close at 6pm.\nAsk about the stain on the blue shirt.\nPay with card.", due: day(-1), categories: ["personal"] }),
     item({ id: "rem:2", kind: "reminder", title: "Problem set 4", containerId: "L2", containerName: "Homework", due: `${day(0)}T23:59`, priority: 1, body: "Questions 1–7, show work for #5.", categories: ["school"] }),
@@ -68,6 +107,8 @@ const snap: Snapshot = {
     item({ id: "rem:7", kind: "reminder", title: "Call landlord", containerId: "L1", containerName: "Errands", due: `${day(0)}T10:15`, categories: ["personal"] }),
     item({ id: "rem:8", kind: "reminder", title: "Pay rent", containerId: "L1", containerName: "Errands", due: day(18), priority: 1, categories: ["personal"] }),
     item({ id: "rem:9", kind: "reminder", title: "Concert tickets on sale", containerId: "L3", containerName: "Someday", due: `${day(4)}T12:00`, categories: ["fun"] }),
+    item({ id: "gl:gitlab.com:9001", kind: "issue", provider: "gitlab", title: "Calibrate wheel encoders", containerId: "gl:gitlab.com:42", containerName: "robotics-club/rover", number: 17, accountId: "sam@gitlab.com", labels: [{ name: "hardware", color: "e2a03f" }], due: day(6), assignees: ["sam"], categories: ["fun"] }),
+    item({ id: "gl:gitlab.com:9002", kind: "issue", provider: "gitlab", title: "Write driver for lidar", containerId: "gl:gitlab.com:42", containerName: "robotics-club/rover", number: 18, accountId: "sam@gitlab.com", categories: ["fun"] }),
     item({ id: "gh:I1", kind: "issue", title: "Write related-work section", containerId: "R1", containerName: "octo/thesis", number: 12, accountId: "octo@github.com", labels: [{ name: "writing", color: "0e8a16" }], due: day(3), categories: ["school"] }),
     item({ id: "gh:I2", kind: "issue", title: "Checkout fails on Safari 18", containerId: "R2", containerName: "acme/storefront", number: 231, accountId: "octo@github.com", labels: [{ name: "bug", color: "d73a4a" }, { name: "business", color: "f2994a" }], status: "In progress", projectIds: ["P1"], assignees: ["octo"], subIssues: { total: 3, completed: 1 }, start: day(-5), due: day(9), projectDates: pd("I2"), categories: ["business"] }),
     item({ id: "gh:I3", kind: "issue", title: "Reproduce on iOS Safari", containerId: "R2", containerName: "acme/storefront", number: 232, accountId: "octo@github.com", parentId: "gh:I2", projectIds: ["P1"], start: day(-3), due: day(1), projectDates: pd("I3"), categories: ["business"] }),
@@ -80,6 +121,7 @@ const snap: Snapshot = {
     { sourceId: "reminders", label: "Apple Reminders", lastSynced: new Date().toISOString(), error: null, syncing: false },
     { sourceId: "R1", label: "octo/thesis", lastSynced: new Date().toISOString(), error: null, syncing: false },
     { sourceId: "R2", label: "acme/storefront", lastSynced: new Date().toISOString(), error: null, syncing: false },
+    { sourceId: "gl:gitlab.com:42", label: "robotics-club/rover", lastSynced: new Date().toISOString(), error: null, syncing: false },
     { sourceId: "P1", label: "Q4 Roadmap", lastSynced: null, error: "GitHub: missing the `project` scope", syncing: false },
   ],
 };
@@ -103,6 +145,31 @@ export function installMock() {
           if (typeof a.due === "string") it.due = a.due || null;
           return structuredClone(it);
         }
+        case "create_event": {
+          const req = a.event as { calendarId: string; title: string; start: string; end: string; allDay?: boolean; location?: string; notes?: string };
+          const e = event({ id: `ev:new${Date.now()}`, ...req, allDay: !!req.allDay, location: req.location || null, notes: req.notes || null });
+          snap.events.push(e);
+          return e;
+        }
+        case "update_event": {
+          const e = snap.events.find((x) => x.id === a.id);
+          if (!e) throw "event not found";
+          const p = a.patch as Record<string, unknown>;
+          for (const k of ["title", "start", "end", "allDay", "calendarId"]) if (p[k] !== undefined) (e as any)[k] = p[k];
+          if (typeof p.notes === "string") e.notes = p.notes || null;
+          if (typeof p.location === "string") e.location = p.location || null;
+          if (typeof p.calendarId === "string") {
+            const cal = calendars.find((c) => c.id === p.calendarId)!;
+            Object.assign(e, { calendarName: cal.title, color: cal.color, categories: cal.defaultCategory ? [cal.defaultCategory] : [] });
+          }
+          return structuredClone(e);
+        }
+        case "delete_event": {
+          snap.events = snap.events.filter((x) => x.id !== a.id);
+          return null;
+        }
+        case "request_calendar_access":
+          return "granted";
         case "discard_item": {
           snap.items = snap.items.filter((i) => i.id !== a.id);
           return null;

@@ -4,6 +4,7 @@ mod commands;
 mod db;
 mod error;
 mod github;
+mod gitlab;
 mod model;
 mod reminders;
 mod secrets;
@@ -48,6 +49,11 @@ pub fn run() {
             commands::remove_source,
             commands::set_default_category,
             commands::request_reminders_access,
+            commands::request_calendar_access,
+            commands::create_event,
+            commands::update_event,
+            commands::delete_event,
+            commands::open_event,
             commands::set_list_enabled,
             commands::upsert_category,
             commands::delete_category,

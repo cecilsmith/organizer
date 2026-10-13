@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Item } from "$lib/api";
-  import { addDays, dueMinutes, parseYmd, weekDays } from "$lib/dates";
+  import type { CalendarEvent } from "$lib/api";
+  import { addDays, dueMinutes, eventDays, parseYmd, weekDays } from "$lib/dates";
   import { store, type CalView } from "$lib/store.svelte";
   import Icon from "../Icon.svelte";
   import MonthView from "./MonthView.svelte";
@@ -29,6 +30,21 @@
     return map;
   });
   const unscheduled = $derived(store.visible.filter((i) => !i.due));
+
+  /** Events on every day they touch: all-day first, then by start time. */
+  const eventsByDay = $derived.by(() => {
+    const map = new Map<string, CalendarEvent[]>();
+    for (const e of store.visibleEvents)
+      for (const day of eventDays(e)) {
+        const list = map.get(day) ?? [];
+        list.push(e);
+        map.set(day, list);
+      }
+    for (const list of map.values())
+      list.sort((a, b) => Number(b.allDay) - Number(a.allDay) || a.start.localeCompare(b.start));
+    return map;
+  });
+  const hasCalendars = $derived(store.snap?.calendarAccess === "granted");
 
   const title = $derived.by(() => {
     if (store.calView === "month") return anchor.toLocaleDateString(undefined, { month: "long", year: "numeric" });
@@ -61,6 +77,19 @@
         <button class:on={store.calView === v} onclick={() => setView(v as CalView)}>{label}</button>
       {/each}
     </div>
+    {#if hasCalendars}
+      <button
+        class="icon-btn"
+        class:on={store.showEvents}
+        title={store.showEvents ? "Hide calendar events" : "Show calendar events"}
+        onclick={() => {
+          store.showEvents = !store.showEvents;
+          store.savePrefs();
+        }}
+      >
+        <Icon name="calendar" />
+      </button>
+    {/if}
     <button
       class="icon-btn"
       class:on={store.showUnscheduled}
@@ -76,12 +105,13 @@
 
   <div class="body">
     {#if store.calView === "month"}
-      <MonthView {byDay} />
+      <MonthView {byDay} {eventsByDay} />
     {:else}
       {#key store.calView}
         <TimeGrid
           days={store.calView === "week" ? weekDays(anchor, store.weekStart) : [addDays(anchor, 0)]}
           {byDay}
+          {eventsByDay}
         />
       {/key}
     {/if}

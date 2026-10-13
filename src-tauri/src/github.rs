@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::error::{Error, Result};
-use crate::model::{Account, Candidate, Item, ItemKind, Label, Project, ProjectDates, Repo, SubIssues};
+use crate::model::{Account, Candidate, Item, ItemKind, Label, Project, ProjectDates, Provider, Repo, SubIssues};
 
 /// Bodies are only used for search and previews; cap them to keep the cache lean.
 const MAX_BODY: usize = 4000;
@@ -193,6 +193,7 @@ impl GitHub {
             name: v["name"].as_str().map(Into::into),
             avatar_url: v["avatarUrl"].as_str().map(Into::into),
             scopes,
+            provider: Provider::Github,
         })
     }
 
@@ -368,6 +369,7 @@ impl GitHub {
                     Item {
                         id: format!("ghpi:{}", node["id"].as_str().unwrap_or_default()),
                         kind: ItemKind::DraftIssue,
+                        provider: Provider::Github,
                         container_id: project.id.clone(),
                         container_name: project.title.clone(),
                         account_id: Some(project.account_id.clone()),
@@ -434,6 +436,7 @@ impl GitHub {
         Ok(Item {
             id: format!("gh:{}", rest.node_id),
             kind: ItemKind::Issue,
+            provider: Provider::Github,
             container_id: repo.id.clone(),
             container_name: repo.full_name(),
             account_id: Some(repo.account_id.clone()),
@@ -837,6 +840,7 @@ fn content_item(n: &Value, account_id: &str) -> Option<Item> {
     Some(Item {
         id: format!("gh:{id}"),
         kind,
+        provider: Provider::Github,
         container_id: str_of(&n["repository"]["id"]),
         container_name: str_of(&n["repository"]["nameWithOwner"]),
         account_id: Some(account_id.into()),

@@ -1,10 +1,13 @@
 <script lang="ts">
-  import type { Item } from "$lib/api";
-  import { dueMinutes, monthGrid, parseYmd, weekdayNames, withTime, ymd } from "$lib/dates";
+  import type { CalendarEvent, Item } from "$lib/api";
+  import { dueMinutes, monthGrid, movedEvent, parseYmd, weekdayNames, withTime, ymd } from "$lib/dates";
   import { store } from "$lib/store.svelte";
   import CalendarChip from "./CalendarChip.svelte";
+  import EventChip from "./EventChip.svelte";
 
-  let { byDay }: { byDay: Map<string, Item[]> } = $props();
+  let { byDay, eventsByDay }: { byDay: Map<string, Item[]>; eventsByDay: Map<string, CalendarEvent[]> } = $props();
+
+  type Entry = { key: string; item?: Item; event?: CalendarEvent };
 
   const anchor = $derived(parseYmd(store.calDate));
   const days = $derived(monthGrid(anchor, store.weekStart));
@@ -19,8 +22,11 @@
 
   let dropDay = $state<string | null>(null);
 
-  function itemsFor(day: string) {
-    return byDay.get(day) ?? [];
+  /** Events first (all-day, then by time), then to-dos — like Apple Calendar. */
+  function entriesFor(day: string): Entry[] {
+    const events = (eventsByDay.get(day) ?? []).map((event) => ({ key: event.id, event }));
+    const items = (byDay.get(day) ?? []).map((item) => ({ key: item.id, item }));
+    return [...events, ...items];
   }
 
   function openDay(day: string) {
@@ -32,11 +38,15 @@
   function ondrop(e: DragEvent, day: string) {
     e.preventDefault();
     dropDay = null;
-    const id = e.dataTransfer?.getData("text/organizer-item");
-    const item = store.items.find((i) => i.id === id);
-    if (!item) return;
+    const itemId = e.dataTransfer?.getData("text/organizer-item");
+    const eventId = e.dataTransfer?.getData("text/organizer-event");
+    const item = itemId && store.items.find((i) => i.id === itemId);
     // Moving to another day keeps the time of day.
-    store.reschedule(item, withTime(day, item.due ? dueMinutes(item.due) : null));
+    if (item) return store.reschedule(item, withTime(day, item.due ? dueMinutes(item.due) : null));
+    const event = eventId && store.visibleEvents.find((ev) => ev.id === eventId);
+    if (event && event.start.slice(0, 10) !== day) {
+      store.updateEvent(event, movedEvent(event, day, event.allDay ? null : dueMinutes(event.start)), `move “${event.title}”`);
+    }
   }
 </script>
 
@@ -47,9 +57,9 @@
   <div class="grid" bind:clientHeight={gridHeight}>
     {#each days as d (ymd(d))}
       {@const day = ymd(d)}
-      {@const items = itemsFor(day)}
-      {@const overflow = items.length > maxChips}
-      {@const shown = overflow ? items.slice(0, maxChips - 1) : items}
+      {@const entries = entriesFor(day)}
+      {@const overflow = entries.length > maxChips}
+      {@const shown = overflow ? entries.slice(0, maxChips - 1) : entries}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="cell"
@@ -63,17 +73,21 @@
         ondragleave={() => dropDay === day && (dropDay = null)}
         ondrop={(e) => ondrop(e, day)}
         ondblclick={() => (store.quickAddDue = day)}
-        title="Double-click to add a to-do on this day"
+        title="Double-click to add something on this day"
       >
         <button class="num" class:today={day === today} onclick={() => openDay(day)}>
           {d.getDate() === 1 ? d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) : d.getDate()}
         </button>
         <div class="items">
-          {#each shown as item (item.id)}
-            <CalendarChip {item} />
+          {#each shown as entry (entry.key)}
+            {#if entry.event}
+              <EventChip event={entry.event} />
+            {:else if entry.item}
+              <CalendarChip item={entry.item} />
+            {/if}
           {/each}
           {#if overflow}
-            <button class="more" onclick={() => openDay(day)}>+{items.length - shown.length} more</button>
+            <button class="more" onclick={() => openDay(day)}>+{entries.length - shown.length} more</button>
           {/if}
         </div>
       </div>

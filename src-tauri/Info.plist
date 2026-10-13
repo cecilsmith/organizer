@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Organizer shows your iCloud, Google and Outlook calendar events next to your to-dos and lets you create and edit them.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Organizer shows your iCloud, Google and Outlook calendar events next to your to-dos and lets you create and edit them.</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
 	<string>Organizer shows your reminders alongside GitHub issues and lets you create, complete and categorize them.</string>
 	<key>NSRemindersUsageDescription</key>

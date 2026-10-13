@@ -13,11 +13,16 @@ use crate::categorize::{Rules, hashtags};
 use crate::db::Db;
 use crate::error::{Error, Result};
 use crate::github::{self, GitHub};
+use crate::gitlab::{self, GitLab};
 use crate::model::*;
 use crate::reminders::{NewReminder, ReminderPatch, Reminders};
 use crate::secrets::{self, Secrets};
 
 const REMINDERS_SOURCE: &str = "reminders";
+const CALENDAR_SOURCE: &str = "calendar";
+/// Events are fetched for this window around today.
+const EVENTS_PAST_DAYS: i64 = 90;
+const EVENTS_FUTURE_DAYS: i64 = 400;
 const GITHUB_INTERVAL: Duration = Duration::from_secs(120);
 const REMINDERS_INTERVAL: Duration = Duration::from_secs(300);
 const GITHUB_CONCURRENCY: usize = 6;
@@ -28,6 +33,7 @@ pub const EVENT_CHANGED: &str = "state-changed";
 pub struct App {
     pub db: Db,
     gh: GitHub,
+    gl: GitLab,
     secrets: Secrets,
     reminders: Reminders,
     handle: AppHandle,
@@ -52,6 +58,7 @@ impl App {
         Self {
             db,
             gh: GitHub::new(),
+            gl: GitLab::new(),
             secrets: Secrets::default(),
             reminders,
             handle,
@@ -71,8 +78,10 @@ impl App {
         let repos = self.db.repos()?;
         let projects = self.db.projects()?;
         let lists = self.db.reminder_lists()?;
+        let event_calendars = self.db.event_calendars()?;
 
-        let rules = self.rules(&categories, &repos, &projects, &lists);
+        let all_lists: Vec<ReminderList> = lists.iter().chain(&event_calendars).cloned().collect();
+        let rules = self.rules(&categories, &repos, &projects, &all_lists);
         let enabled_lists: HashSet<&str> =
             lists.iter().filter(|l| l.enabled).map(|l| l.id.as_str()).collect();
 
@@ -82,6 +91,19 @@ impl App {
             .map(|mut i| {
                 i.categories = rules.categorize(&i);
                 i
+            })
+            .collect();
+
+        let enabled_calendars: HashSet<&str> =
+            event_calendars.iter().filter(|c| c.enabled).map(|c| c.id.as_str()).collect();
+        let events = self
+            .db
+            .events()?
+            .into_iter()
+            .filter(|e| enabled_calendars.contains(e.calendar_id.as_str()))
+            .map(|mut e| {
+                e.categories = rules.categorize_event(&e);
+                e
             })
             .collect();
 
@@ -99,6 +121,9 @@ impl App {
             Ok(())
         };
         status(REMINDERS_SOURCE, "Apple Reminders".into())?;
+        if self.reminders.calendar_access_status() == "granted" {
+            status(CALENDAR_SOURCE, "Calendars".into())?;
+        }
         for r in &repos {
             status(&r.id, r.full_name())?;
         }
@@ -113,6 +138,9 @@ impl App {
             projects,
             reminder_lists: lists,
             reminders_access: self.reminders.access_status().into(),
+            event_calendars,
+            calendar_access: self.reminders.calendar_access_status().into(),
+            events,
             items,
             sources,
         })
@@ -138,7 +166,34 @@ impl App {
     }
 
     pub async fn sync_all(&self) {
-        futures::join!(self.sync_reminders(), self.sync_github());
+        futures::join!(self.sync_reminders(), self.sync_events(), self.sync_github());
+    }
+
+    pub async fn sync_events(&self) {
+        if self.reminders.calendar_access_status() != "granted" {
+            return;
+        }
+        let Some(_guard) = self.begin_sync(CALENDAR_SOURCE) else { return };
+        let res = async {
+            let cals = self.reminders.event_calendars().await?;
+            self.db.sync_event_calendars(&cals)?;
+            let enabled = self.db.event_calendars()?.into_iter().filter(|c| c.enabled).map(|c| c.id).collect();
+            let today = chrono::Local::now().date_naive();
+            let events = self
+                .reminders
+                .events(
+                    enabled,
+                    today - chrono::Duration::days(EVENTS_PAST_DAYS),
+                    today + chrono::Duration::days(EVENTS_FUTURE_DAYS),
+                )
+                .await?;
+            self.db.replace_events(&events)
+        }
+        .await;
+        if let Err(e) = res {
+            tracing::warn!("calendar sync failed: {e}");
+            let _ = self.db.set_sync_error(CALENDAR_SOURCE, &e.to_string());
+        }
     }
 
     pub async fn sync_github(&self) {
@@ -160,6 +215,7 @@ impl App {
             let account = self.account(source.account_id())?;
             let token = self.secrets.get(&account.id)?;
             let items = match &source {
+                SourceRef::Repo(r) if r.provider == Provider::Gitlab => self.gl.issues(&account.host, &token, r).await?,
                 SourceRef::Repo(r) => self.gh.repo_issues(&account.host, &token, r).await?,
                 SourceRef::Project(p) => self.gh.project_items(&account.host, &token, p).await?,
             };
@@ -204,12 +260,15 @@ impl App {
                     let app = self.clone();
                     tokio::spawn(async move { app.sync_github().await });
                 }
-                _ = rem_tick.tick() => self.sync_reminders().await,
+                _ = rem_tick.tick() => {
+                    futures::join!(self.sync_reminders(), self.sync_events());
+                }
                 Some(()) = reminder_changes.recv() => {
-                    // EventKit fires bursts of notifications; coalesce them.
+                    // EventKit fires bursts of notifications (for reminders and
+                    // events alike); coalesce them.
                     tokio::time::sleep(Duration::from_millis(250)).await;
                     while reminder_changes.try_recv().is_ok() {}
-                    self.sync_reminders().await;
+                    futures::join!(self.sync_reminders(), self.sync_events());
                 }
             }
         }
@@ -227,13 +286,15 @@ impl App {
         Ok((a, t))
     }
 
-    pub async fn add_account(&self, token: &str, host: &str) -> Result<Account> {
+    pub async fn add_account(&self, token: &str, host: &str, provider: Provider) -> Result<Account> {
         let token = token.trim();
-        let host = normalize_host(host);
         if token.is_empty() {
             return Err(Error::msg("paste a token first"));
         }
-        let account = self.gh.viewer(&host, token).await?;
+        let account = match provider {
+            Provider::Github => self.gh.viewer(&normalize_host(host), token).await?,
+            Provider::Gitlab => self.gl.viewer(&normalize_gitlab_host(host), token).await?,
+        };
         self.secrets.set(&account.id, token)?;
         self.db.upsert_account(&account)?;
         self.changed();
@@ -257,7 +318,7 @@ impl App {
                 .await
                 .map_err(|e| Error::msg(e.to_string()))?;
             let line = match token {
-                Ok(t) => match self.add_account(&t, &host).await {
+                Ok(t) => match self.add_account(&t, &host, Provider::Github).await {
                     Ok(a) if a.scopes.is_empty() || a.scopes.iter().any(|s| s.contains("project")) => {
                         format!("✓ {}", a.id)
                     }
@@ -285,17 +346,27 @@ impl App {
 
     pub async fn repo_candidates(&self, account_id: &str) -> Result<Vec<Candidate>> {
         let (a, t) = self.account_token(account_id)?;
-        self.gh.viewer_repos(&a.host, &t).await
+        match a.provider {
+            Provider::Github => self.gh.viewer_repos(&a.host, &t).await,
+            Provider::Gitlab => self.gl.projects(&a.host, &t).await,
+        }
     }
 
     pub async fn project_candidates(&self, account_id: &str) -> Result<Vec<Candidate>> {
         let (a, t) = self.account_token(account_id)?;
+        if a.provider == Provider::Gitlab {
+            return Err(Error::msg("Projects are a GitHub feature — pick a GitHub account"));
+        }
         self.gh.viewer_projects(&a.host, &t).await
     }
 
     /// Resolves `owner/name` (or a GitHub URL) to a repo.
     pub async fn lookup_repo(&self, account_id: &str, spec: &str) -> Result<Candidate> {
         let (a, t) = self.account_token(account_id)?;
+        if a.provider == Provider::Gitlab {
+            let path = parse_gitlab_path(spec).ok_or_else(|| Error::msg("use the form group/project or paste the project URL"))?;
+            return self.gl.project(&a.host, &t, &path).await;
+        }
         let (owner, name) = parse_repo_spec(spec).ok_or_else(|| Error::msg("use the form owner/repo"))?;
         self.gh.repo(&a.host, &t, &owner, &name).await
     }
@@ -316,6 +387,7 @@ impl App {
             name: c.name,
             url: c.url,
             default_category: category,
+            provider: self.account(account_id)?.provider,
         };
         self.db.upsert_repo(&repo)?;
         self.changed();
@@ -362,8 +434,83 @@ impl App {
     pub async fn set_list_enabled(&self, id: &str, enabled: bool) -> Result<()> {
         self.db.set_list_enabled(id, enabled)?;
         self.changed();
-        self.sync_reminders().await;
+        futures::join!(self.sync_reminders(), self.sync_events());
         Ok(())
+    }
+
+    pub async fn request_calendar_access(&self) -> Result<String> {
+        self.reminders.request_calendar_access().await?;
+        self.sync_events().await;
+        Ok(self.reminders.calendar_access_status().into())
+    }
+
+    // ---- events -----------------------------------------------------------
+
+    fn event(&self, id: &str, fallback: Option<CalendarEvent>) -> Result<CalendarEvent> {
+        match self.db.event(id)? {
+            Some(e) => Ok(e),
+            None => fallback
+                .filter(|f| f.id == id)
+                .ok_or_else(|| Error::msg("event not found — try refreshing")),
+        }
+    }
+
+    pub async fn create_event(&self, new: NewEvent) -> Result<CalendarEvent> {
+        let cal = self
+            .db
+            .event_calendars()?
+            .into_iter()
+            .find(|c| c.id == new.calendar_id)
+            .ok_or_else(|| Error::msg("pick a calendar"))?;
+        // Like reminders: tag the event if its calendar doesn't imply the area.
+        let mut notes = new.notes.filter(|n| !n.trim().is_empty());
+        if let Some(cat) = new.category.filter(|c| cal.default_category.as_ref() != Some(c)) {
+            let tag = format!("#{}", self.category(&cat)?.label);
+            notes = Some(match notes {
+                Some(n) => format!("{n}\n{tag}"),
+                None => tag,
+            });
+        }
+        let event = self
+            .reminders
+            .create_event(new.calendar_id, new.title, new.start, new.end, new.all_day, new.location, notes)
+            .await?;
+        self.db.put_event(&event)?;
+        self.changed();
+        Ok(event)
+    }
+
+    pub async fn update_event(
+        &self,
+        id: &str,
+        patch: EventPatch,
+        fallback: Option<CalendarEvent>,
+    ) -> Result<CalendarEvent> {
+        let event = self.event(id, fallback)?;
+        if patch.title.as_deref().is_some_and(|t| t.trim().is_empty()) {
+            return Err(Error::msg("the title can't be empty"));
+        }
+        let updated = self.reminders.update_event(event.event_id.clone(), event.occurrence, patch).await?;
+        // Ids are stable across moves (see `CalendarEvent::id`), but replace
+        // defensively in case EventKit detached the occurrence.
+        self.db.remove_event(id)?;
+        self.db.put_event(&updated)?;
+        self.changed();
+        Ok(updated)
+    }
+
+    /// Deletes an event. Only used to undo creating one.
+    pub async fn delete_event(&self, id: &str, fallback: Option<CalendarEvent>) -> Result<()> {
+        let event = self.event(id, fallback)?;
+        self.reminders.remove_event(event.event_id, event.occurrence).await?;
+        self.db.remove_event(id)?;
+        self.changed();
+        Ok(())
+    }
+
+    pub fn event_url(&self, id: &str) -> Result<String> {
+        let event = self.event(id, None)?;
+        Ok(format!("ical://ekevent/{}?method=show&options=more", event.event_id))
     }
 
     // ---- categories -------------------------------------------------------
@@ -484,6 +631,15 @@ impl App {
                 if let Some(cat) = category {
                     labels.push(self.category(&cat)?.label);
                 }
+                if repo.provider == Provider::Gitlab {
+                    let item = self
+                        .gl
+                        .create_issue(&account.host, &token, &repo, &title, body.as_deref(), &labels, assign_self)
+                        .await?;
+                    self.db.put_item(&repo.id, &item)?;
+                    self.changed();
+                    return Ok(item);
+                }
                 let assignees = if assign_self { vec![account.login.clone()] } else { vec![] };
                 let mut item = self
                     .gh
@@ -504,6 +660,11 @@ impl App {
 
     pub async fn set_completed(&self, id: &str, completed: bool, fallback: Option<Item>) -> Result<()> {
         let item = self.item_or(id, fallback)?;
+        if item.provider == Provider::Gitlab {
+            let event = if completed { "close" } else { "reopen" };
+            self.gitlab_update(&item, serde_json::json!({ "state_event": event })).await?;
+            return Ok(());
+        }
         match item.kind {
             ItemKind::Reminder => {
                 let raw = id.trim_start_matches("rem:").to_string();
@@ -545,6 +706,12 @@ impl App {
         fallback: Option<Item>,
     ) -> Result<Item> {
         let item = self.item_or(id, fallback)?;
+        if item.provider == Provider::Gitlab {
+            if start.is_some() {
+                return Err(Error::msg("GitLab issues have a due date but no start date"));
+            }
+            return self.gitlab_patch(&item, ItemPatch { due, ..Default::default() }).await;
+        }
         if item.kind == ItemKind::Reminder {
             if start.is_some() {
                 return Err(Error::msg("reminders don't have start dates"));
@@ -584,6 +751,16 @@ impl App {
     /// as "not planned" (deleting issues needs admin rights).
     pub async fn discard_item(&self, id: &str) -> Result<()> {
         let (item, _) = self.item(id)?;
+        if item.provider == Provider::Gitlab {
+            // Deleting needs owner rights, so undo closes the new issue.
+            let (account, token, repo) = self.gitlab_repo(&item)?;
+            self.gl
+                .update_issue(&account.host, &token, &repo, item.number.unwrap_or_default(), serde_json::json!({ "state_event": "close" }))
+                .await?;
+            self.db.remove_item(id)?;
+            self.changed();
+            return Ok(());
+        }
         match item.kind {
             ItemKind::Reminder => {
                 self.reminders.remove(id.trim_start_matches("rem:").to_string()).await?;
@@ -613,6 +790,15 @@ impl App {
             let t = t.to_lowercase();
             categories.iter().any(|c| c.label.to_lowercase() == t || c.name.to_lowercase() == t)
         };
+
+        if item.provider == Provider::Gitlab {
+            // GitLab takes the whole label list at once.
+            let mut labels: Vec<String> =
+                item.labels.iter().map(|l| l.name.clone()).filter(|l| !is_category_tag(l)).collect();
+            labels.extend(target.as_ref().map(|t| t.label.clone()));
+            self.gitlab_update(&item, serde_json::json!({ "labels": labels.join(",") })).await?;
+            return Ok(());
+        }
 
         match item.kind {
             ItemKind::Issue | ItemKind::PullRequest => {
@@ -683,6 +869,23 @@ impl App {
     /// cache truncates them, and saving a truncated body would lose text.
     pub async fn item_details(&self, id: &str) -> Result<ItemDetails> {
         let (mut item, _) = self.item(id)?;
+        if item.provider == Provider::Gitlab {
+            let (account, token, repo) = self.gitlab_repo(&item)?;
+            let iid = item.number.unwrap_or_default();
+            let (issue, labels, members) = futures::try_join!(
+                self.gl.issue(&account.host, &token, &repo, iid),
+                self.gl.labels(&account.host, &token, &repo),
+                self.gl.members(&account.host, &token, &repo),
+            )?;
+            let mut fresh = issue.item;
+            fresh.body = issue.body;
+            fresh.categories = item.categories;
+            return Ok(ItemDetails {
+                item: fresh,
+                label_options: labels,
+                assignee_options: members.into_iter().map(|(_, u)| u).collect(),
+            });
+        }
         let mut details = ItemDetails { item: item.clone(), label_options: vec![], assignee_options: vec![] };
         match item.kind {
             ItemKind::Reminder => {}
@@ -716,6 +919,9 @@ impl App {
 
     pub async fn update_item(&self, id: &str, patch: ItemPatch, fallback: Option<Item>) -> Result<Item> {
         let item = self.item_or(id, fallback)?;
+        if item.provider == Provider::Gitlab {
+            return self.gitlab_patch(&item, patch).await;
+        }
         if patch.title.as_deref().is_some_and(|t| t.trim().is_empty()) {
             return Err(Error::msg("the title can't be empty"));
         }
@@ -812,6 +1018,70 @@ impl App {
     }
 }
 
+// ---- GitLab -------------------------------------------------------------------
+
+impl App {
+    /// The account, token and (tracked or reconstructed) repo behind a GitLab issue.
+    fn gitlab_repo(&self, item: &Item) -> Result<(Account, String, Repo)> {
+        let (account, token) = self.account_token(item.account_id.as_deref().unwrap_or_default())?;
+        let repo = match self.db.repos()?.into_iter().find(|r| r.id == item.container_id) {
+            Some(r) => r,
+            None => {
+                let (owner, name) = item.container_name.rsplit_once('/').unwrap_or(("", &item.container_name));
+                Repo {
+                    id: item.container_id.clone(),
+                    account_id: account.id.clone(),
+                    owner: owner.into(),
+                    name: name.into(),
+                    url: String::new(),
+                    default_category: None,
+                    provider: Provider::Gitlab,
+                }
+            }
+        };
+        Ok((account, token, repo))
+    }
+
+    /// Sends a GitLab issue update and caches the result.
+    async fn gitlab_update(&self, item: &Item, fields: serde_json::Value) -> Result<Item> {
+        let (account, token, repo) = self.gitlab_repo(item)?;
+        let iid = item.number.ok_or_else(|| Error::msg("issue is missing its number"))?;
+        let mut updated = self.gl.update_issue(&account.host, &token, &repo, iid, fields).await?.item;
+        updated.categories = vec![];
+        // Keep showing it for undo even once closed; the next sync drops it.
+        self.db.put_item(&repo.id, &updated)?;
+        self.changed();
+        Ok(updated)
+    }
+
+    /// Applies editor changes to a GitLab issue.
+    async fn gitlab_patch(&self, item: &Item, patch: ItemPatch) -> Result<Item> {
+        let mut fields = serde_json::Map::new();
+        if let Some(t) = patch.title {
+            fields.insert("title".into(), t.trim().into());
+        }
+        if let Some(b) = patch.body {
+            fields.insert("description".into(), b.into());
+        }
+        if let Some(l) = patch.labels {
+            fields.insert("labels".into(), l.join(",").into());
+        }
+        if let Some(d) = patch.due {
+            let d: String = d.chars().take(10).collect();
+            fields.insert("due_date".into(), if d.is_empty() { serde_json::Value::Null } else { d.into() });
+        }
+        if let Some(a) = patch.assignees {
+            let (account, token, repo) = self.gitlab_repo(item)?;
+            let members = self.gl.members(&account.host, &token, &repo).await?;
+            fields.insert("assignee_ids".into(), gitlab::assignee_ids(&members, &a)?.into());
+        }
+        if fields.is_empty() {
+            return Ok(item.clone());
+        }
+        self.gitlab_update(item, fields.into()).await
+    }
+}
+
 enum SourceRef {
     Repo(Repo),
     Project(Project),
@@ -878,6 +1148,7 @@ fn placeholder() -> Item {
     Item {
         id: String::new(),
         kind: ItemKind::Issue,
+        provider: Provider::Github,
         container_id: String::new(),
         container_name: String::new(),
         account_id: None,
@@ -933,6 +1204,20 @@ fn slug(s: &str) -> String {
 fn normalize_host(host: &str) -> String {
     let h = host.trim().trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/');
     if h.is_empty() || h == "api.github.com" { "github.com".into() } else { h.into() }
+}
+
+fn normalize_gitlab_host(host: &str) -> String {
+    let h = host.trim().trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/');
+    if h.is_empty() { "gitlab.com".into() } else { h.into() }
+}
+
+/// `group/sub/project` from a path or a project/issue URL.
+fn parse_gitlab_path(spec: &str) -> Option<String> {
+    let s = spec.trim().trim_end_matches('/').trim_end_matches(".git");
+    let s = s.split_once("://").map_or(s, |(_, rest)| rest.split_once('/').map_or("", |(_, p)| p));
+    // Drop anything after GitLab's `/-/` separator (issues, tree, …).
+    let path = s.split("/-/").next()?.trim_matches('/');
+    (path.contains('/') && !path.is_empty()).then(|| path.to_string())
 }
 
 fn parse_repo_spec(spec: &str) -> Option<(String, String)> {
@@ -1041,6 +1326,18 @@ mod tests {
         assert_eq!(p.list_id.as_deref(), Some("L2"));
         assert_eq!(p.labels.unwrap(), vec!["bug", "school"]);
         assert!(p.body.is_none() && p.priority.is_none() && p.assignees.is_none());
+    }
+
+    #[test]
+    fn parses_gitlab_paths() {
+        assert_eq!(parse_gitlab_path("group/sub/app").as_deref(), Some("group/sub/app"));
+        assert_eq!(
+            parse_gitlab_path("https://gitlab.com/group/sub/app/-/issues/12").as_deref(),
+            Some("group/sub/app")
+        );
+        assert_eq!(parse_gitlab_path("https://git.corp.dev/team/app.git").as_deref(), Some("team/app"));
+        assert_eq!(parse_gitlab_path("app"), None);
+        assert_eq!(normalize_gitlab_host(""), "gitlab.com");
     }
 
     #[test]

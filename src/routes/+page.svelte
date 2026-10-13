@@ -5,8 +5,10 @@
   import Icon from "$lib/components/Icon.svelte";
   import ItemRow from "$lib/components/ItemRow.svelte";
   import EditPanel from "$lib/components/EditPanel.svelte";
+  import EventPanel from "$lib/components/EventPanel.svelte";
   import Calendar from "$lib/components/calendar/Calendar.svelte";
   import Gantt from "$lib/components/gantt/Gantt.svelte";
+  import { sourceIcon } from "$lib/providers";
   import QuickAdd from "$lib/components/QuickAdd.svelte";
   import Settings from "$lib/components/Settings.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -32,7 +34,10 @@
   const tabColor = $derived(store.categories.find((c) => c.id === store.tab)?.color);
 
   const connected = $derived(
-    !!store.snap && (store.snap.remindersAccess === "granted" || store.snap.accounts.length > 0),
+    !!store.snap &&
+      (store.snap.remindersAccess === "granted" ||
+        store.snap.calendarAccess === "granted" ||
+        store.snap.accounts.length > 0),
   );
 
   interface Group {
@@ -118,7 +123,7 @@
         g = {
           key,
           title: it.containerName,
-          icon: it.kind === "reminder" ? "list" : it.kind === "draftIssue" ? "stack" : "github",
+          icon: it.kind === "draftIssue" ? "stack" : sourceIcon(it),
           color: it.kind === "reminder" ? lists.get(it.containerId)?.color : null,
           items: [],
           rows: [],
@@ -155,8 +160,8 @@
   }
 
   function onkeydown(e: KeyboardEvent) {
-    // The editor panel handles its own keys.
-    if (store.editing) return;
+    // The editor panels handle their own keys.
+    if (store.editing || store.editingEvent) return;
     const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
     // ⌘Z undoes the last change and ⌘⇧Z redoes it (Ctrl works too). While
     // you're typing, they undo/redo text instead.
@@ -245,6 +250,13 @@
   /** Calendar keys: ←/→ step the period, T jumps to today, plus actions on the selected item. */
   function calendarKey(e: KeyboardEvent): boolean {
     const selected = store.items.find((it) => it.id === store.selectedId);
+    const event = store.visibleEvents.find((ev) => ev.id === store.selectedId);
+    if (event && ["Enter", "e", "o"].includes(e.key)) {
+      if (e.key === "o") store.openEvent(event);
+      else store.editEvent(event);
+      e.preventDefault();
+      return true;
+    }
     switch (e.key) {
       case "ArrowLeft":
       case "h":
@@ -326,7 +338,7 @@
         />
       </div>
       <div class="seg" role="group" aria-label="Source">
-        {#each [["all", "All"], ["reminders", "Reminders"], ["github", "GitHub"]] as [v, label] (v)}
+        {#each [["all", "All"], ["reminders", "Reminders"], ["github", "Issues"]] as [v, label] (v)}
           <button class:on={store.sourceFilter === v} onclick={() => setSource(v as SourceFilter)}>{label}</button>
         {/each}
       </div>
@@ -355,7 +367,7 @@
         <div class="welcome">
           <h2>Everything you need to do, in one place.</h2>
           <p class="muted">
-            Connect Apple Reminders and as many GitHub accounts, repos and projects as you like. Sort it all into
+            Connect Apple Reminders, your calendars, and as many GitHub and GitLab accounts as you like. Sort it all into
             Personal, Business, School and Fun with labels.
           </p>
           <div class="cards">
@@ -423,6 +435,12 @@
 {#if store.editing}
   {#key store.editing.id}
     <EditPanel item={store.editing} />
+  {/key}
+{/if}
+
+{#if store.editingEvent}
+  {#key store.editingEvent.id}
+    <EventPanel event={store.editingEvent} />
   {/key}
 {/if}
 

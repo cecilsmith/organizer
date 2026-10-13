@@ -40,7 +40,7 @@
       <CalendarChip {item} />
     {/each}
     {#if github.length}
-      <div class="sub faint">GitHub</div>
+      <div class="sub faint">Issues</div>
       {#each github as item (item.id)}
         <CalendarChip {item} />
       {/each}

@@ -5,7 +5,8 @@
 
   let { kind }: { kind: "repo" | "project" } = $props();
 
-  const accounts = $derived(store.snap?.accounts ?? []);
+  // GitHub Projects only exist on GitHub.
+  const accounts = $derived((store.snap?.accounts ?? []).filter((a) => kind === "repo" || a.provider === "github"));
   let accountId = $state("");
   let candidates = $state<Candidate[] | null>(null);
   let loading = $state(false);
@@ -16,6 +17,12 @@
   let adding = $state<string | null>(null);
 
   const account = $derived(accounts.find((a) => a.id === accountId) ?? accounts[0]);
+  // A different account means a different list to browse.
+  $effect(() => {
+    void account?.id;
+    candidates = null;
+    error = "";
+  });
   const tracked = $derived(
     new Set(kind === "repo" ? (store.snap?.repos ?? []).map((r) => r.id) : (store.snap?.projects ?? []).map((p) => p.id)),
   );
@@ -70,7 +77,7 @@
 </script>
 
 {#if !accounts.length}
-  <p class="muted">Link a GitHub account first.</p>
+  <p class="muted">Link {kind === "repo" ? "a GitHub or GitLab" : "a GitHub"} account first.</p>
 {:else}
   <div class="picker">
     <div class="row">
@@ -82,14 +89,26 @@
       <span class="muted">Default area</span>
       <CategorySelect value={category} onchange={(v) => (category = v)} />
       <button class="btn" onclick={browse} disabled={loading}>
-        {loading ? "Loading…" : candidates ? "Reload" : kind === "repo" ? "Browse my repos" : "Browse my projects"}
+        {loading
+          ? "Loading…"
+          : candidates
+            ? "Reload"
+            : kind === "repo"
+              ? account?.provider === "gitlab"
+                ? "Browse my GitLab projects"
+                : "Browse my repos"
+              : "Browse my projects"}
       </button>
     </div>
     <div class="row">
       <input
         class="field grow"
         bind:value={manual}
-        placeholder={kind === "repo" ? "owner/repo or GitHub URL" : "owner/number or project URL"}
+        placeholder={kind === "project"
+          ? "owner/number or project URL"
+          : account?.provider === "gitlab"
+            ? "group/project or GitLab URL"
+            : "owner/repo or GitHub URL"}
         onkeydown={(e) => e.key === "Enter" && addManual()}
       />
       <button class="btn" onclick={addManual} disabled={!manual.trim()}>Add</button>

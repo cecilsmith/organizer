@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export type ItemKind = "reminder" | "issue" | "pullRequest" | "draftIssue";
+export type Provider = "github" | "gitlab";
 
 export interface Category {
   id: string;
@@ -17,6 +18,7 @@ export interface Account {
   name: string | null;
   avatarUrl: string | null;
   scopes: string[];
+  provider: Provider;
 }
 
 export interface Repo {
@@ -26,6 +28,7 @@ export interface Repo {
   name: string;
   url: string;
   defaultCategory: string | null;
+  provider: Provider;
 }
 
 export interface Project {
@@ -56,6 +59,8 @@ export interface Label {
 export interface Item {
   id: string;
   kind: ItemKind;
+  /** Issues and PRs: which service they live in. */
+  provider: Provider;
   containerId: string;
   containerName: string;
   accountId: string | null;
@@ -99,6 +104,50 @@ export interface SourceStatus {
 
 export type RemindersAccess = "granted" | "writeOnly" | "denied" | "restricted" | "notDetermined" | "unsupported";
 
+/** One occurrence of a calendar event (iCloud, Google, Outlook… via macOS). */
+export interface CalendarEvent {
+  id: string;
+  eventId: string;
+  occurrence: number;
+  calendarId: string;
+  calendarName: string;
+  color: string | null;
+  title: string;
+  notes: string | null;
+  location: string | null;
+  url: string | null;
+  /** `YYYY-MM-DDTHH:MM`, or `YYYY-MM-DD` when all-day. */
+  start: string;
+  /** Timed: end time. All-day: last day (inclusive). */
+  end: string;
+  allDay: boolean;
+  recurring: boolean;
+  writable: boolean;
+  categories: string[];
+}
+
+export interface NewEvent {
+  calendarId: string;
+  title: string;
+  start: string;
+  end: string;
+  allDay?: boolean;
+  location?: string | null;
+  notes?: string | null;
+  category?: string | null;
+}
+
+/** Edits to one event occurrence; omitted fields are left alone, "" clears notes/location. */
+export interface EventPatch {
+  title?: string;
+  notes?: string;
+  location?: string;
+  start?: string;
+  end?: string;
+  allDay?: boolean;
+  calendarId?: string;
+}
+
 export interface Snapshot {
   categories: Category[];
   accounts: Account[];
@@ -106,6 +155,9 @@ export interface Snapshot {
   projects: Project[];
   reminderLists: ReminderList[];
   remindersAccess: RemindersAccess;
+  eventCalendars: ReminderList[];
+  calendarAccess: RemindersAccess;
+  events: CalendarEvent[];
   items: Item[];
   sources: SourceStatus[];
 }
@@ -161,7 +213,8 @@ export const api = {
   snapshot: () => invoke<Snapshot>("get_snapshot"),
   syncNow: () => invoke<void>("sync_now"),
 
-  addAccount: (token: string, host?: string) => invoke<Account>("add_account", { token, host }),
+  addAccount: (token: string, host: string, provider: Provider) =>
+    invoke<Account>("add_account", { token, host, provider }),
   importGhAccounts: () => invoke<string[]>("import_gh_accounts"),
   removeAccount: (id: string) => invoke<void>("remove_account", { id }),
 
@@ -179,6 +232,14 @@ export const api = {
 
   requestRemindersAccess: () => invoke<RemindersAccess>("request_reminders_access"),
   setListEnabled: (id: string, enabled: boolean) => invoke<void>("set_list_enabled", { id, enabled }),
+
+  requestCalendarAccess: () => invoke<RemindersAccess>("request_calendar_access"),
+  createEvent: (event: NewEvent) => invoke<CalendarEvent>("create_event", { event }),
+  updateEvent: (id: string, patch: EventPatch, fallback?: CalendarEvent) =>
+    invoke<CalendarEvent>("update_event", { id, patch, fallback: fallback ?? null }),
+  deleteEvent: (id: string, fallback?: CalendarEvent) =>
+    invoke<void>("delete_event", { id, fallback: fallback ?? null }),
+  openEvent: (id: string) => invoke<void>("open_event", { id }),
 
   upsertCategory: (category: Category) => invoke<Category>("upsert_category", { category }),
   deleteCategory: (id: string) => invoke<void>("delete_category", { id }),

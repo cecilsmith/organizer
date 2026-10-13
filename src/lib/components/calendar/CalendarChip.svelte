@@ -50,7 +50,7 @@
     e.stopPropagation();
     store.edit(item);
   }}
-  title="{minutes !== null ? `${formatTime(minutes)} · ` : ''}{item.title}{item.containerName ? ` — ${item.containerName}` : ''}{draggable ? '' : '\n(This date comes from a milestone or iteration on GitHub)'}"
+  title="{minutes !== null ? `${formatTime(minutes)} · ` : ''}{item.title}{item.containerName ? ` — ${item.containerName}` : ''}{draggable || item.completed ? '' : '\n(This date comes from a milestone or iteration — change it on GitHub)'}"
 >
   {#if item.kind !== "pullRequest"}
     <button
