@@ -153,7 +153,7 @@ button {
 }
 .field:focus {
   border-color: color-mix(in srgb, var(--accent) 70%, transparent);
-  background: var(--bg);
+  background-color: var(--bg);
 }
 textarea.field {
   height: auto;
@@ -170,9 +170,6 @@ select.field {
   background-position: right 8px center;
   background-size: 10px 10px;
   text-overflow: ellipsis;
-}
-select.field:focus {
-  background-image: var(--chevron);
 }
 
 .dot {
