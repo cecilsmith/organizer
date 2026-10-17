@@ -24,8 +24,16 @@ const CALENDAR_SOURCE: &str = "calendar";
 const EVENTS_PAST_DAYS: i64 = 90;
 const EVENTS_FUTURE_DAYS: i64 = 400;
 const GITHUB_INTERVAL: Duration = Duration::from_secs(120);
+/// How far back the Completed view reaches. Items finished before this drop out
+/// of the cache on the next sync of their source.
+const COMPLETED_DAYS: i64 = 30;
 const REMINDERS_INTERVAL: Duration = Duration::from_secs(300);
 const GITHUB_CONCURRENCY: usize = 6;
+
+/// The oldest completion time the app keeps.
+fn completed_cutoff() -> chrono::DateTime<chrono::Local> {
+    chrono::Local::now() - chrono::Duration::days(COMPLETED_DAYS)
+}
 
 /// Tells the UI to re-fetch the snapshot.
 pub const EVENT_CHANGED: &str = "state-changed";
@@ -214,10 +222,13 @@ impl App {
         let res = async {
             let account = self.account(source.account_id())?;
             let token = self.secrets.token(&account)?;
+            let since = completed_cutoff().to_rfc3339();
             let items = match &source {
-                SourceRef::Repo(r) if r.provider == Provider::Gitlab => self.gl.issues(&account.host, &token, r).await?,
-                SourceRef::Repo(r) => self.gh.repo_issues(&account.host, &token, r).await?,
-                SourceRef::Project(p) => self.gh.project_items(&account.host, &token, p).await?,
+                SourceRef::Repo(r) if r.provider == Provider::Gitlab => {
+                    self.gl.issues(&account.host, &token, r, &since).await?
+                }
+                SourceRef::Repo(r) => self.gh.repo_issues(&account.host, &token, r, &since).await?,
+                SourceRef::Project(p) => self.gh.project_items(&account.host, &token, p, &since).await?,
             };
             self.db.replace_items(&id, &items)
         }
@@ -236,8 +247,11 @@ impl App {
         let res = async {
             let lists = self.reminders.lists().await?;
             self.db.sync_reminder_lists(&lists)?;
-            let enabled = self.db.reminder_lists()?.into_iter().filter(|l| l.enabled).map(|l| l.id).collect();
-            let items = self.reminders.incomplete(enabled).await?;
+            let enabled: Vec<String> =
+                self.db.reminder_lists()?.into_iter().filter(|l| l.enabled).map(|l| l.id).collect();
+            let mut items = self.reminders.incomplete(enabled.clone()).await?;
+            // Recently completed reminders, for the Completed view.
+            items.extend(self.reminders.completed(enabled, completed_cutoff().naive_local()).await?);
             self.db.replace_items(REMINDERS_SOURCE, &items)
         }
         .await;
@@ -744,9 +758,13 @@ impl App {
             }
         }
         if !completed {
-            self.ensure_cached(&Item { completed: false, ..item })?;
+            self.ensure_cached(&Item { completed: false, completed_at: None, ..item })?;
         }
-        self.update_cached(id, |i| i.completed = completed)
+        let now = chrono::Local::now().to_rfc3339();
+        self.update_cached(id, |i| {
+            i.completed = completed;
+            i.completed_at = completed.then(|| now.clone());
+        })
     }
 
     /// Changes an item's start and/or due date (the Gantt chart's drag and
@@ -1191,6 +1209,7 @@ fn merge_copies(rows: Vec<(String, Item)>) -> Vec<Item> {
                     base.due = base.due.or(other.due);
                 }
                 base.completed |= other.completed;
+                base.completed_at = base.completed_at.or(other.completed_at);
                 *existing = base;
             }
         }
@@ -1211,6 +1230,7 @@ fn placeholder() -> Item {
         url: None,
         number: None,
         completed: false,
+        completed_at: None,
         due: None,
         priority: 0,
         labels: vec![],

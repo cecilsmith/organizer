@@ -1,12 +1,21 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import type { Item } from "$lib/api";
-  import { store, dueBucket, type DueBucket, type GroupBy, type SourceFilter } from "$lib/store.svelte";
+  import {
+    store,
+    dueBucket,
+    SORT_NAMES,
+    type DueBucket,
+    type GroupBy,
+    type SortBy,
+    type SourceFilter,
+  } from "$lib/store.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import ItemRow from "$lib/components/ItemRow.svelte";
   import EditPanel from "$lib/components/EditPanel.svelte";
   import EventPanel from "$lib/components/EventPanel.svelte";
   import Calendar from "$lib/components/calendar/Calendar.svelte";
+  import Completed from "$lib/components/Completed.svelte";
   import Gantt from "$lib/components/gantt/Gantt.svelte";
   import { sourceIcon } from "$lib/providers";
   import QuickAdd from "$lib/components/QuickAdd.svelte";
@@ -141,8 +150,12 @@
       .map((g) => ({ ...g, rows: nest(g.items, true) }));
   });
 
-  const flat = $derived(groups.flatMap((g) => (collapsed[g.key] ? [] : g.rows.map((r) => r.item))));
-  let collapsed = $state<Record<string, boolean>>({});
+  const flat = $derived(
+    store.view === "completed"
+      ? store.doneGroups.flatMap((g) => (store.collapsed[g.key] ? [] : g.items))
+      : groups.flatMap((g) => (store.collapsed[g.key] ? [] : g.rows.map((r) => r.item))),
+  );
+  let sortOpen = $state(false);
 
   function setTab(tab: string) {
     store.tab = tab;
@@ -310,9 +323,19 @@
     store.groupBy = g;
     store.savePrefs();
   }
+  function setSort(s: SortBy) {
+    sortOpen = false;
+    store.setSort(s);
+  }
 </script>
 
-<svelte:window {onkeydown} onclick={() => (store.menuFor = null)} />
+<svelte:window
+  {onkeydown}
+  onclick={() => {
+    store.menuFor = null;
+    sortOpen = false;
+  }}
+/>
 
 <div class="app">
   <Sidebar />
@@ -347,11 +370,36 @@
           <button class:on={store.groupBy === "source"} onclick={() => setGroup("source")} title="Group by list / repo"><Icon name="stack" size={14} /></button>
           <button class:on={store.groupBy === "due"} onclick={() => setGroup("due")} title="Group by due date"><Icon name="flag" size={14} /></button>
         </div>
+        <div class="sort">
+          <button
+            class="seg-btn"
+            aria-haspopup="menu"
+            aria-expanded={sortOpen}
+            title="Sort by {SORT_NAMES[store.sortBy].toLowerCase()}"
+            onclick={(e) => {
+              e.stopPropagation();
+              sortOpen = !sortOpen;
+            }}
+          >
+            <Icon name="sort" size={14} />
+          </button>
+          {#if sortOpen}
+            <div class="menu" role="menu">
+              {#each Object.entries(SORT_NAMES) as [value, label] (value)}
+                <button role="menuitem" onclick={(e) => { e.stopPropagation(); setSort(value as SortBy); }}>
+                  {label}
+                  {#if store.sortBy === value}<Icon name="check" size={13} class="tick" />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
       {/if}
       <div class="seg view" role="group" aria-label="View">
         <button class:on={store.view === "list"} onclick={() => store.setView("list")} title="List (V)"><Icon name="list" size={14} /> List</button>
         <button class:on={store.view === "calendar"} onclick={() => store.setView("calendar")} title="Calendar (V)"><Icon name="calendar" size={14} /> Calendar</button>
         <button class:on={store.view === "gantt"} onclick={() => store.setView("gantt")} title="Gantt chart (V)"><Icon name="gantt" size={14} /> Gantt</button>
+        <button class:on={store.view === "completed"} onclick={() => store.setView("completed")} title="What you finished"><Icon name="check" size={14} /> Done</button>
       </div>
     </header>
 
@@ -361,6 +409,8 @@
       <Calendar />
     {:else if store.view === "gantt" && connected}
       <Gantt bind:this={gantt} />
+    {:else if store.view === "completed" && connected}
+      <Completed />
     {:else}
     <div class="scroll" role="listbox" aria-label="To-dos">
       {#if store.snap && !connected}
@@ -400,13 +450,13 @@
       {:else}
         {#each groups as g (g.key)}
           <section class="group">
-            <button class="group-head" onclick={() => (collapsed[g.key] = !collapsed[g.key])}>
-              <Icon name={collapsed[g.key] ? "chevron" : "down"} size={12} class="faint" />
+            <button class="group-head" onclick={() => store.toggleGroup(g.key)}>
+              <Icon name={store.collapsed[g.key] ? "chevron" : "down"} size={12} class="faint" />
               {#if g.color}<span class="dot" style:background={g.color}></span>{:else}<Icon name={g.icon} size={13} />{/if}
               <span class="gtitle">{g.title}</span>
               <span class="faint">{g.items.filter((i) => !i.completed).length}</span>
             </button>
-            {#if !collapsed[g.key]}
+            {#if !store.collapsed[g.key]}
               {#each g.rows as { item, depth, parentTitle } (item.id)}
                 <div id="row-{item.id}">
                   <ItemRow
@@ -542,6 +592,51 @@
     color: var(--text);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
     font-weight: 500;
+  }
+  .sort {
+    position: relative;
+  }
+  .seg-btn {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    background: var(--bg-input);
+    color: var(--text-2);
+  }
+  .seg-btn:hover {
+    color: var(--text);
+  }
+  .menu {
+    position: absolute;
+    right: 0;
+    top: 32px;
+    z-index: 30;
+    min-width: 170px;
+    padding: 5px;
+    border-radius: 8px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+  }
+  .menu button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    height: 26px;
+    padding: 0 8px;
+    border-radius: 5px;
+    font-size: 12.5px;
+    text-align: left;
+  }
+  .menu button:hover {
+    background: var(--accent);
+    color: var(--accent-text);
+  }
+  .menu :global(.tick) {
+    margin-left: auto;
   }
   .scroll {
     flex: 1;

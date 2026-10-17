@@ -142,6 +142,7 @@ mod tests {
             url: None,
             number: None,
             completed: false,
+            completed_at: None,
             due: None,
             priority: 0,
             labels: vec![],

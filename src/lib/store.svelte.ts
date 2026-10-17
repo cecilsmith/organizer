@@ -12,9 +12,10 @@ import { addDays, addMonths, parseYmd, ymd } from "./dates";
 
 export type SourceFilter = "all" | "reminders" | "github";
 export type GroupBy = "source" | "due";
+export type SortBy = "due" | "priority" | "title" | "updated" | "container";
 /** Whether reminder notes show under every row, or only the selected one. */
 export type ShowNotes = "always" | "selected";
-export type View = "list" | "calendar" | "gantt";
+export type View = "list" | "calendar" | "gantt" | "completed";
 export type GanttZoom = "day" | "week" | "month";
 export type GanttGroup = "source" | "area";
 export type CalView = "month" | "week" | "day";
@@ -29,6 +30,16 @@ export interface UndoEntry {
 
 const UNDO_LIMIT = 50;
 
+/** Completed items from one day, for the Completed view. */
+export interface DoneGroup {
+  /** Group key for `store.collapsed`. */
+  key: string;
+  /** `YYYY-MM-DD`, or "" when the source didn't say when it was finished. */
+  day: string;
+  title: string;
+  items: Item[];
+}
+
 export interface Toast {
   id: number;
   text: string;
@@ -38,6 +49,8 @@ export interface Toast {
 
 /** Completed items stay on screen this long so a mis-click can be undone. */
 const LINGER_MS = 4000;
+/** How far back the Completed view reaches; matches `COMPLETED_DAYS` in app.rs. */
+export const COMPLETED_DAYS = 30;
 const FOCUS_SYNC_AFTER_MS = 30_000;
 
 const PREFS_KEY = "organizer.prefs";
@@ -45,6 +58,9 @@ const PREFS_KEY = "organizer.prefs";
 interface Prefs {
   tab: string;
   groupBy: GroupBy;
+  sortBy: SortBy;
+  /** Keys of the list-view groups that are collapsed. */
+  collapsed: string[];
   sourceFilter: SourceFilter;
   showNotes: ShowNotes;
   view: View;
@@ -70,6 +86,9 @@ class Store {
   query = $state("");
   sourceFilter = $state<SourceFilter>("all");
   groupBy = $state<GroupBy>("source");
+  sortBy = $state<SortBy>("due");
+  /** Collapsed list-view groups, by group key. */
+  collapsed = $state<Record<string, boolean>>({});
   showNotes = $state<ShowNotes>("selected");
   view = $state<View>("list");
   calView = $state<CalView>("month");
@@ -115,6 +134,8 @@ class Store {
     const p = loadPrefs();
     if (p.tab) this.tab = p.tab;
     if (p.groupBy) this.groupBy = p.groupBy;
+    if (p.sortBy && p.sortBy in SORTS) this.sortBy = p.sortBy;
+    if (Array.isArray(p.collapsed)) this.collapsed = Object.fromEntries(p.collapsed.map((k) => [k, true]));
     if (p.showNotes) this.showNotes = p.showNotes;
     if (p.view) this.view = p.view;
     if (p.calView) this.calView = p.calView;
@@ -133,6 +154,8 @@ class Store {
         JSON.stringify({
           tab: this.tab,
           groupBy: this.groupBy,
+          sortBy: this.sortBy,
+          collapsed: Object.keys(this.collapsed).filter((k) => this.collapsed[k]),
           sourceFilter: this.sourceFilter,
           showNotes: this.showNotes,
           view: this.view,
@@ -214,6 +237,44 @@ class Store {
     return out;
   });
 
+  /**
+   * Items the backend has as done, newest first: the Completed view's contents.
+   * The cache keeps the last 30 days, so this is a window, not a full history.
+   */
+  completedItems: Item[] = $derived.by(() => {
+    const out: Item[] = [];
+    for (const it of this.snap?.items ?? []) {
+      const o = this.overrides[it.id];
+      const merged = o ? { ...it, ...o } : it;
+      if (merged.completed) out.push(merged);
+    }
+    return out.sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""));
+  });
+
+  /** Completed items under the current area tab and search. */
+  visibleDone: Item[] = $derived.by(() =>
+    this.completedItems.filter((it) => this.inTab(it, this.tab) && this.matches(it)),
+  );
+
+  /**
+   * Completed items grouped by the local day they were finished, newest first.
+   * Items the source gave no completion time for land under "Earlier".
+   */
+  doneGroups: DoneGroup[] = $derived.by(() => {
+    const groups = new Map<string, DoneGroup>();
+    for (const it of this.visibleDone) {
+      const day = it.completedAt ? ymd(new Date(it.completedAt)) : "";
+      let g = groups.get(day);
+      if (!g) {
+        g = { key: `done:${day}`, day, title: day ? formatDue(day) : "Earlier", items: [] };
+        groups.set(day, g);
+      }
+      g.items.push(it);
+    }
+    // `visibleDone` is already newest first, so the days come out in order.
+    return [...groups.values()];
+  });
+
   /** Open-item counts per tab id ("all", "inbox", or a category id). */
   counts: Record<string, number> = $derived.by(() => {
     const c: Record<string, number> = { all: 0, inbox: 0 };
@@ -249,8 +310,20 @@ class Store {
   });
 
   visible: Item[] = $derived.by(() =>
-    this.items.filter((it) => this.inTab(it, this.tab) && this.matches(it)).sort(compareItems),
+    this.items.filter((it) => this.inTab(it, this.tab) && this.matches(it)).sort(SORTS[this.sortBy]),
   );
+
+  setSort(sortBy: SortBy) {
+    this.sortBy = sortBy;
+    this.savePrefs();
+  }
+
+  /** Folds a list-view group away; the choice is remembered across restarts. */
+  toggleGroup(key: string) {
+    if (this.collapsed[key]) delete this.collapsed[key];
+    else this.collapsed[key] = true;
+    this.savePrefs();
+  }
 
   inTab(item: { categories: string[] }, tab: string) {
     if (tab === "all") return true;
@@ -285,9 +358,12 @@ class Store {
 
   async toggle(item: Item, recordUndo = true) {
     const completed = !item.completed;
-    this.overrides[item.id] = { ...this.overrides[item.id], completed };
+    // The real completion time arrives with the next snapshot; until then this
+    // keeps the item under today in the Completed view rather than "Earlier".
+    const completedAt = completed ? new Date().toISOString() : null;
+    this.overrides[item.id] = { ...this.overrides[item.id], completed, completedAt };
     if (completed) {
-      this.lingering[item.id] = { ...item, completed };
+      this.lingering[item.id] = { ...item, completed, completedAt };
       setTimeout(() => {
         delete this.lingering[item.id];
         if (this.overrides[item.id]?.completed) delete this.overrides[item.id];
@@ -415,7 +491,7 @@ class Store {
     this.calDate = ymd(new Date());
   }
 
-  /** Cycles List → Calendar → Gantt (V). */
+  /** Cycles List → Calendar → Gantt (V); from Completed it goes back to List. */
   nextView() {
     const order: View[] = ["list", "calendar", "gantt"];
     this.setView(order[(order.indexOf(this.view) + 1) % order.length]);
@@ -557,6 +633,26 @@ class Store {
   }
 }
 
+/** 0 means "no priority", which sorts after every real one. */
+const prio = (i: Item) => i.priority || 10;
+
+export const SORT_NAMES: Record<SortBy, string> = {
+  due: "Due date",
+  priority: "Priority",
+  title: "Title",
+  updated: "Last updated",
+  container: "List / repo",
+};
+
+/** Each sort falls back to the due-date order so equal keys stay stable. */
+const SORTS: Record<SortBy, (a: Item, b: Item) => number> = {
+  due: (a, b) => compareItems(a, b),
+  priority: (a, b) => prio(a) - prio(b) || compareItems(a, b),
+  title: (a, b) => a.title.localeCompare(b.title) || compareItems(a, b),
+  updated: (a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "") || compareItems(a, b),
+  container: (a, b) => a.containerName.localeCompare(b.containerName) || compareItems(a, b),
+};
+
 /** Due date first (soonest, undated last), then priority, then most recently updated. */
 function compareItems(a: Item, b: Item) {
   if (a.due !== b.due) {
@@ -564,9 +660,7 @@ function compareItems(a: Item, b: Item) {
     if (!b.due) return -1;
     return a.due < b.due ? -1 : 1;
   }
-  const pa = a.priority || 10;
-  const pb = b.priority || 10;
-  if (pa !== pb) return pa - pb;
+  if (prio(a) !== prio(b)) return prio(a) - prio(b);
   return (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "");
 }
 

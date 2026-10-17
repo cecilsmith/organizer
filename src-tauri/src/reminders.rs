@@ -114,6 +114,13 @@ mod mac {
 
     type Job = Box<dyn FnOnce(&Store) + Send>;
 
+    /// Which reminders a fetch asks EventKit for.
+    enum Which {
+        Incomplete,
+        /// Completed at or after this instant.
+        CompletedSince(chrono::NaiveDateTime),
+    }
+
     struct Store {
         ek: Retained<EKEventStore>,
         _observer: Retained<ProtocolObject<dyn NSObjectProtocol>>,
@@ -360,6 +367,16 @@ mod mac {
 
         /// All incomplete reminders in the given lists.
         pub async fn incomplete(&self, list_ids: Vec<String>) -> Result<Vec<Item>> {
+            self.fetch(list_ids, Which::Incomplete).await
+        }
+
+        /// Reminders in the given lists completed at or after `since`, for the
+        /// Completed view.
+        pub async fn completed(&self, list_ids: Vec<String>, since: chrono::NaiveDateTime) -> Result<Vec<Item>> {
+            self.fetch(list_ids, Which::CompletedSince(since)).await
+        }
+
+        async fn fetch(&self, list_ids: Vec<String>, which: Which) -> Result<Vec<Item>> {
             if list_ids.is_empty() {
                 // An empty filter would mean "all lists" to EventKit.
                 return Ok(vec![]);
@@ -374,12 +391,21 @@ mod mac {
                     return;
                 }
                 let cals = NSArray::from_retained_slice(&cals);
-                let pred = unsafe {
-                    s.ek.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars(
-                        None,
-                        None,
-                        Some(&cals),
-                    )
+                let pred = match which {
+                    Which::Incomplete => unsafe {
+                        s.ek.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars(
+                            None,
+                            None,
+                            Some(&cals),
+                        )
+                    },
+                    Which::CompletedSince(since) => unsafe {
+                        s.ek.predicateForCompletedRemindersWithCompletionDateStarting_ending_calendars(
+                            Some(&ns_date(since)),
+                            None,
+                            Some(&cals),
+                        )
+                    },
                 };
                 let reply = Mutex::new(Some(reply));
                 let block = RcBlock::new(move |arr: *mut NSArray<EKReminder>| {
@@ -640,6 +666,7 @@ mod mac {
                 url: None,
                 number: None,
                 completed: r.isCompleted(),
+                completed_at: r.completionDate().and_then(|d| rfc3339(&d)),
                 due: r.dueDateComponents().and_then(|c| format_components(&c)),
                 priority: r.priority() as i64,
                 labels: vec![],
@@ -742,6 +769,9 @@ mod other {
             unsupported()
         }
         pub async fn incomplete(&self, _: Vec<String>) -> Result<Vec<Item>> {
+            unsupported()
+        }
+        pub async fn completed(&self, _: Vec<String>, _: chrono::NaiveDateTime) -> Result<Vec<Item>> {
             unsupported()
         }
         pub async fn create(&self, _: NewReminder) -> Result<Item> {

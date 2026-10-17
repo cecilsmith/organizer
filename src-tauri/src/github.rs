@@ -37,7 +37,7 @@ fn rest_url(host: &str) -> String {
 
 const ISSUE_FIELDS: &str = r#"
 fragment IssueFields on Issue {
-  id number title body url state updatedAt
+  id number title body url state updatedAt closedAt
   repository { id nameWithOwner }
   labels(first: 20) { nodes { name color } }
   assignees(first: 10) { nodes { login } }
@@ -49,7 +49,7 @@ fragment IssueFields on Issue {
 
 const PR_FIELDS: &str = r#"
 fragment PrFields on PullRequest {
-  id number title body url state updatedAt
+  id number title body url state updatedAt closedAt
   repository { id nameWithOwner }
   labels(first: 20) { nodes { name color } }
   assignees(first: 10) { nodes { login } }
@@ -297,19 +297,37 @@ impl GitHub {
 
     // ---- sync -------------------------------------------------------------
 
-    pub async fn repo_issues(&self, host: &str, token: &str, repo: &Repo) -> Result<Vec<Item>> {
-        let query = format!(
-            r#"query($o: String!, $n: String!, $after: String) {{ repository(owner: $o, name: $n) {{
-                issues(states: OPEN, first: 100, after: $after, orderBy: {{ field: UPDATED_AT, direction: DESC }}) {{
-                  pageInfo {{ hasNextPage endCursor }}
-                  nodes {{ ...IssueFields }} }} }} }} {ISSUE_FIELDS}"#
-        );
+    /// A repo's open issues, plus the ones closed since `closed_since` (RFC 3339)
+    /// so the Completed view has something to show.
+    pub async fn repo_issues(&self, host: &str, token: &str, repo: &Repo, closed_since: &str) -> Result<Vec<Item>> {
+        let mut items = self.issue_page(host, token, repo, "states: OPEN", Value::Null).await?;
+        // `since` filters on updatedAt, so drop issues that were closed earlier
+        // and only touched (a comment, a label) inside the window.
+        let closed = self
+            .issue_page(host, token, repo, "states: CLOSED, filterBy: { since: $since }", closed_since.into())
+            .await?;
+        items.extend(closed.into_iter().filter(|i| i.completed_since(closed_since)));
+        Ok(items)
+    }
+
+    /// Pages through one `issues(...)` connection, with `filter` spliced into it.
+    async fn issue_page(
+        &self,
+        host: &str,
+        token: &str,
+        repo: &Repo,
+        filter: &str,
+        since: Value,
+    ) -> Result<Vec<Item>> {
+        let query = issues_query(filter);
         let mut items = Vec::new();
         let mut after = Value::Null;
         for _ in 0..MAX_PAGES {
-            let data = self
-                .graphql(host, token, &query, json!({ "o": repo.owner, "n": repo.name, "after": after }))
-                .await?;
+            let mut vars = json!({ "o": repo.owner, "n": repo.name, "after": after });
+            if !since.is_null() {
+                vars["since"] = since.clone();
+            }
+            let data = self.graphql(host, token, &query, vars).await?;
             let conn = &data["repository"]["issues"];
             if conn.is_null() {
                 return Err(Error::GitHub(format!("{} is not accessible", repo.full_name())));
@@ -328,7 +346,13 @@ impl GitHub {
         Ok(items)
     }
 
-    pub async fn project_items(&self, host: &str, token: &str, project: &Project) -> Result<Vec<Item>> {
+    pub async fn project_items(
+        &self,
+        host: &str,
+        token: &str,
+        project: &Project,
+        closed_since: &str,
+    ) -> Result<Vec<Item>> {
         let query = format!(
             r#"query($id: ID!, $after: String) {{ node(id: $id) {{ ... on ProjectV2 {{
                 fields(first: 50) {{ nodes {{ ... on ProjectV2Field {{ id name dataType }} }} }}
@@ -380,6 +404,7 @@ impl GitHub {
                         url: Some(project.url.clone()),
                         number: None,
                         completed: false,
+                        completed_at: None,
                         due: None,
                         priority: 0,
                         labels: vec![],
@@ -395,7 +420,8 @@ impl GitHub {
                     }
                 } else {
                     match content_item(content, &project.account_id) {
-                        Some(it) if !it.completed => it,
+                        // Closed long ago: past the Completed view's window.
+                        Some(it) if !it.completed || it.completed_since(closed_since) => it,
                         _ => continue,
                     }
                 };
@@ -447,6 +473,7 @@ impl GitHub {
             url: Some(rest.html_url),
             number: Some(rest.number),
             completed: false,
+            completed_at: None,
             due: None,
             priority: 0,
             labels: rest.labels.into_iter().map(|l| Label { name: l.name, color: l.color }).collect(),
@@ -851,6 +878,7 @@ fn content_item(n: &Value, account_id: &str) -> Option<Item> {
         url: n["url"].as_str().map(Into::into),
         number: n["number"].as_i64(),
         completed: matches!(n["state"].as_str(), Some("CLOSED" | "MERGED")),
+        completed_at: n["closedAt"].as_str().map(Into::into),
         due: n["milestone"]["dueOn"].as_str().map(|d| d.chars().take(10).collect()),
         priority: 0,
         labels: n["labels"]["nodes"]
@@ -874,6 +902,19 @@ fn content_item(n: &Value, account_id: &str) -> Option<Item> {
     })
 }
 
+/// One page of a repo's issues, with `filter` spliced into the connection.
+/// `$since` is only declared when the filter uses it: GraphQL rejects an
+/// operation that declares a variable it never mentions.
+fn issues_query(filter: &str) -> String {
+    let since = if filter.contains("$since") { ", $since: DateTime" } else { "" };
+    format!(
+        r#"query($o: String!, $n: String!, $after: String{since}) {{ repository(owner: $o, name: $n) {{
+                issues({filter}, first: 100, after: $after, orderBy: {{ field: UPDATED_AT, direction: DESC }}) {{
+                  pageInfo {{ hasNextPage endCursor }}
+                  nodes {{ ...IssueFields }} }} }} }} {ISSUE_FIELDS}"#
+    )
+}
+
 /// Adds a hint when GitHub rejects a request for lack of the `project` scope.
 fn explain_scopes(msg: String) -> String {
     if msg.contains("read:project") || msg.contains("'project'") || msg.contains("required scopes") {
@@ -889,6 +930,15 @@ fn explain_scopes(msg: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declares_the_since_variable_only_where_it_is_used() {
+        let open = issues_query("states: OPEN");
+        assert!(!open.contains("$since"), "an unused variable fails GraphQL validation");
+        assert!(open.contains("issues(states: OPEN, first: 100"));
+        let closed = issues_query("states: CLOSED, filterBy: { since: $since }");
+        assert!(closed.contains("$after: String, $since: DateTime)"));
+    }
 
     #[test]
     fn parses_issue_and_pr_nodes() {
@@ -913,11 +963,18 @@ mod tests {
         assert_eq!(it.parent_id.as_deref(), Some("gh:I_0"));
         assert_eq!(it.sub_issues, Some(SubIssues { total: 3, completed: 1 }));
 
+        assert_eq!(it.completed_at, None);
+
         let pr = json!({ "__typename": "PullRequest", "id": "PR_1", "state": "MERGED",
+                         "closedAt": "2026-10-09T12:00:00Z",
                          "repository": { "id": "R_1", "nameWithOwner": "o/r" } });
         let it = content_item(&pr, "a").unwrap();
         assert_eq!(it.kind, ItemKind::PullRequest);
         assert!(it.completed);
+        assert_eq!(it.completed_at.as_deref(), Some("2026-10-09T12:00:00Z"));
+        assert!(it.completed_since("2026-10-01T00:00:00+00:00"));
+        // A different RFC 3339 spelling of a later instant.
+        assert!(!it.completed_since("2026-10-09T12:00:01.500+00:00"));
 
         assert!(content_item(&json!({ "__typename": "DraftIssue", "id": "x" }), "a").is_none());
     }

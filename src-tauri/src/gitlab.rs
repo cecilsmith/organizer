@@ -53,6 +53,7 @@ struct GlIssue {
     state: String,
     web_url: String,
     updated_at: Option<String>,
+    closed_at: Option<String>,
     due_date: Option<String>,
     #[serde(default)]
     labels: Vec<GlLabel>,
@@ -210,16 +211,30 @@ impl GitLab {
 
     // ---- issues -----------------------------------------------------------
 
-    pub async fn issues(&self, host: &str, token: &str, repo: &Repo) -> Result<Vec<Item>> {
+    /// A project's open issues, plus the ones closed since `closed_since`
+    /// (RFC 3339) for the Completed view.
+    pub async fn issues(&self, host: &str, token: &str, repo: &Repo, closed_since: &str) -> Result<Vec<Item>> {
         let pid = project_id(&repo.id)?.to_string();
-        let values = self
-            .get_all(
-                host,
-                token,
-                &["projects", &pid, "issues"],
-                &[("state", "opened"), ("with_labels_details", "true"), ("order_by", "updated_at")],
-            )
+        let mut items = self.issue_page(host, token, repo, &pid, &[("state", "opened")]).await?;
+        let closed = self
+            .issue_page(host, token, repo, &pid, &[("state", "closed"), ("updated_after", closed_since)])
             .await?;
+        // `updated_after` matches edits too, so keep only what was closed inside the window.
+        items.extend(closed.into_iter().filter(|i| i.completed_since(closed_since)));
+        Ok(items)
+    }
+
+    async fn issue_page(
+        &self,
+        host: &str,
+        token: &str,
+        repo: &Repo,
+        pid: &str,
+        filter: &[(&str, &str)],
+    ) -> Result<Vec<Item>> {
+        let mut query = vec![("with_labels_details", "true"), ("order_by", "updated_at")];
+        query.extend_from_slice(filter);
+        let values = self.get_all(host, token, &["projects", pid, "issues"], &query).await?;
         values
             .into_iter()
             .map(|v| Ok(to_item(host, repo, &account_of(repo), serde_json::from_value(v)?)))
@@ -330,6 +345,7 @@ fn to_item(host: &str, repo: &Repo, account_id: &str, i: GlIssue) -> Item {
         url: Some(i.web_url),
         number: Some(i.iid),
         completed: i.state == "closed",
+        completed_at: i.closed_at,
         due: i.due_date.or(i.milestone.and_then(|m| m.due_date)),
         priority: 0,
         labels: i
