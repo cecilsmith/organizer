@@ -16,6 +16,7 @@
   import EventPanel from "$lib/components/EventPanel.svelte";
   import Calendar from "$lib/components/calendar/Calendar.svelte";
   import Completed from "$lib/components/Completed.svelte";
+  import Today from "$lib/components/Today.svelte";
   import Gantt from "$lib/components/gantt/Gantt.svelte";
   import { sourceIcon } from "$lib/providers";
   import QuickAdd from "$lib/components/QuickAdd.svelte";
@@ -34,13 +35,20 @@
   });
 
   const tabName = $derived(
-    store.tab === "all"
-      ? "All"
-      : store.tab === "inbox"
-        ? "Inbox"
-        : (store.categories.find((c) => c.id === store.tab)?.name ?? "All"),
+    store.tab === "today"
+      ? "Today"
+      : store.tab === "all"
+        ? "All"
+        : store.tab === "inbox"
+          ? "Inbox"
+          : (store.categories.find((c) => c.id === store.tab)?.name ?? "All"),
   );
   const tabColor = $derived(store.categories.find((c) => c.id === store.tab)?.color);
+  const todayDate = new Date().toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
 
   const connected = $derived(
     !!store.snap &&
@@ -150,26 +158,31 @@
       .map((g) => ({ ...g, rows: nest(g.items, true) }));
   });
 
+  /** The items you can act on with the keyboard, in screen order. */
   const flat = $derived(
-    store.view === "completed"
-      ? store.doneGroups.flatMap((g) => (store.collapsed[g.key] ? [] : g.items))
-      : groups.flatMap((g) => (store.collapsed[g.key] ? [] : g.rows.map((r) => r.item))),
+    store.tab === "today"
+      ? store.todaySections.flatMap((s) => (store.collapsed[s.key] ? [] : s.items))
+      : store.view === "completed"
+        ? store.doneGroups.flatMap((g) => (store.collapsed[g.key] ? [] : g.items))
+        : groups.flatMap((g) => (store.collapsed[g.key] ? [] : g.rows.map((r) => r.item))),
+  );
+
+  /** Every selectable row, in screen order; Today's rows include its events. */
+  const navRows: { id: string }[] = $derived(
+    store.tab === "today"
+      ? store.todaySections.flatMap((s) => (store.collapsed[s.key] ? [] : [...s.events, ...s.items]))
+      : flat,
   );
   let sortOpen = $state(false);
 
-  function setTab(tab: string) {
-    store.tab = tab;
-    store.selectedId = null;
-    store.savePrefs();
-  }
-
   async function moveSelection(delta: number) {
-    if (!flat.length) return;
-    const i = flat.findIndex((it) => it.id === store.selectedId);
-    const next = i < 0 ? (delta > 0 ? 0 : flat.length - 1) : Math.min(flat.length - 1, Math.max(0, i + delta));
-    store.selectedId = flat[next].id;
+    if (!navRows.length) return;
+    const i = navRows.findIndex((r) => r.id === store.selectedId);
+    const last = navRows.length - 1;
+    const next = i < 0 ? (delta > 0 ? 0 : last) : Math.min(last, Math.max(0, i + delta));
+    store.selectedId = navRows[next].id;
     await tick();
-    document.getElementById(`row-${CSS.escape(flat[next].id)}`)?.scrollIntoView({ block: "nearest" });
+    document.getElementById(`row-${CSS.escape(navRows[next].id)}`)?.scrollIntoView({ block: "nearest" });
   }
 
   function onkeydown(e: KeyboardEvent) {
@@ -189,8 +202,8 @@
       const n = Number(e.key);
       if (n >= 1 && n <= 9) {
         e.preventDefault();
-        const tabs = ["all", "inbox", ...store.categories.map((c) => c.id)];
-        if (tabs[n - 1]) setTab(tabs[n - 1]);
+        const tabs = ["today", "all", "inbox", ...store.categories.map((c) => c.id)];
+        if (tabs[n - 1]) store.setTab(tabs[n - 1]);
       } else if (e.key === "n") {
         e.preventDefault();
         addInput?.focus();
@@ -208,9 +221,12 @@
     }
     if (typing || store.settingsOpen) return;
     if (e.key === "v") {
-      store.nextView();
+      // Today is a tab, not a view, so V steps out of it rather than cycling.
+      if (store.tab === "today") store.leaveToday();
+      else store.nextView();
       return;
     }
+    if (store.tab === "today" && todayKey(e)) return;
     if (store.view === "calendar" && calendarKey(e)) return;
     if (store.view === "gantt" && ganttKey(e)) return;
     const selected = flat.find((it) => it.id === store.selectedId);
@@ -258,6 +274,16 @@
         store.selectedId = null;
         break;
     }
+  }
+
+  /** In Today, ↵/E and O work on a selected event; everything else falls through. */
+  function todayKey(e: KeyboardEvent): boolean {
+    const event = store.todayEvents.find((ev) => ev.id === store.selectedId);
+    if (!event || !["Enter", "e", "o"].includes(e.key)) return false;
+    if (e.key === "o") store.openEvent(event);
+    else store.editEvent(event);
+    e.preventDefault();
+    return true;
   }
 
   /** Calendar keys: ←/→ step the period, T jumps to today, plus actions on the selected item. */
@@ -345,6 +371,7 @@
       <h1 data-tauri-drag-region>
         {#if tabColor}<span class="dot big" style:background={tabColor}></span>{/if}
         {tabName}
+        {#if store.tab === "today"}<span class="date">{todayDate}</span>{/if}
       </h1>
       <div class="search">
         <Icon name="search" size={14} />
@@ -365,7 +392,7 @@
           <button class:on={store.sourceFilter === v} onclick={() => setSource(v as SourceFilter)}>{label}</button>
         {/each}
       </div>
-      {#if store.view === "list"}
+      {#if store.view === "list" && store.tab !== "today"}
         <div class="seg" role="group" aria-label="Group by">
           <button class:on={store.groupBy === "source"} onclick={() => setGroup("source")} title="Group by list / repo"><Icon name="stack" size={14} /></button>
           <button class:on={store.groupBy === "due"} onclick={() => setGroup("due")} title="Group by due date"><Icon name="flag" size={14} /></button>
@@ -395,17 +422,21 @@
           {/if}
         </div>
       {/if}
+      {#if store.tab !== "today"}
       <div class="seg view" role="group" aria-label="View">
         <button class:on={store.view === "list"} onclick={() => store.setView("list")} title="List (V)"><Icon name="list" size={14} /> List</button>
         <button class:on={store.view === "calendar"} onclick={() => store.setView("calendar")} title="Calendar (V)"><Icon name="calendar" size={14} /> Calendar</button>
         <button class:on={store.view === "gantt"} onclick={() => store.setView("gantt")} title="Gantt chart (V)"><Icon name="gantt" size={14} /> Gantt</button>
         <button class:on={store.view === "completed"} onclick={() => store.setView("completed")} title="What you finished"><Icon name="check" size={14} /> Done</button>
       </div>
+      {/if}
     </header>
 
     <QuickAdd bind:inputEl={addInput} />
 
-    {#if store.view === "calendar" && connected}
+    {#if store.tab === "today" && connected}
+      <Today />
+    {:else if store.view === "calendar" && connected}
       <Calendar />
     {:else if store.view === "gantt" && connected}
       <Gantt bind:this={gantt} />
@@ -544,6 +575,11 @@
   .dot.big {
     width: 11px;
     height: 11px;
+  }
+  .date {
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--text-3);
   }
   .search {
     display: flex;

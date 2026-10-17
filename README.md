@@ -2,6 +2,7 @@
 
 A macOS app that puts your Apple Reminders, calendars, and GitHub and GitLab work in one place, sorted into areas: **Personal**, **Business**, **School** and **Fun**. You can add more areas.
 
+- **Today:** one screen for the day — today's calendar events, everything due today, and everything overdue — across every area at once, with each row carrying its area's colour. It sits above All in the sidebar (⌘1) with a count of what's left to do, and it's where the app opens the first time you run it; after that you come back to whichever tab you left it on.
 - **Apple Reminders:** reads and writes your reminders directly through EventKit. Changes you make in the Reminders app show up here right away.
 - **Calendars:** events from every calendar on your Mac (iCloud, plus Google/Gmail and Outlook/Microsoft 365 accounts added in System Settings → Internet Accounts) appear in the Calendar views with their real durations. Create them from quick-add, edit them in a side panel, drag them to another time or day, and drag their bottom edge to change when they end. Repeating events change one occurrence at a time.
 - **GitHub:** link several accounts (github.com or Enterprise), then track any number of repositories (open issues) and Projects (issues, PRs and drafts, with their Status).
@@ -121,7 +122,7 @@ Open **Settings** (⌘,).
 
 | Key | Action |
 | --- | --- |
-| ⌘1 … ⌘9 | All, Inbox, then each area |
+| ⌘1 … ⌘9 | Today, All, Inbox, then each area |
 | ⌘N / `n` | New to-do |
 | ⌘F / `/` | Search (`#123` matches an issue number) |
 | ↑ ↓ / `j` `k` | Move selection |
@@ -133,7 +134,7 @@ Open **Settings** (⌘,).
 | `m` | Move to area |
 | ⌘Z / Ctrl+Z | Undo the last change (complete, move, edit or add) |
 | ⌘⇧Z / Ctrl+Shift+Z | Redo the last undone change |
-| `V` | Switch between List, Calendar and Gantt |
+| `V` | Switch between List, Calendar and Gantt (from Today, back to the tab you came from) |
 | ← → / `h` `l` | Previous / next month, week or day (Calendar) |
 | `T` | Jump to today (Calendar, Gantt) |
 | ⌘R | Sync now |

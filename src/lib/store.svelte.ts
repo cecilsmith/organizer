@@ -8,7 +8,7 @@ import {
   type ItemPatch,
   type Snapshot,
 } from "./api";
-import { addDays, addMonths, parseYmd, ymd } from "./dates";
+import { addDays, addMonths, eventDays, parseYmd, ymd } from "./dates";
 
 export type SourceFilter = "all" | "reminders" | "github";
 export type GroupBy = "source" | "due";
@@ -37,6 +37,17 @@ export interface DoneGroup {
   /** `YYYY-MM-DD`, or "" when the source didn't say when it was finished. */
   day: string;
   title: string;
+  items: Item[];
+}
+
+/** One block of the Today view: today's schedule, what's due, what slipped. */
+export interface TodaySection {
+  /** Group key for `store.collapsed`. */
+  key: string;
+  title: string;
+  icon: string;
+  /** A section holds either events or items, never both. */
+  events: CalendarEvent[];
   items: Item[];
 }
 
@@ -82,7 +93,8 @@ function loadPrefs(): Partial<Prefs> {
 
 class Store {
   snap = $state<Snapshot | null>(null);
-  tab = $state<string>("all");
+  /** "today", "all", "inbox" or a category id. A fresh install opens on Today. */
+  tab = $state<string>("today");
   query = $state("");
   sourceFilter = $state<SourceFilter>("all");
   groupBy = $state<GroupBy>("source");
@@ -132,7 +144,10 @@ class Store {
 
   constructor() {
     const p = loadPrefs();
-    if (p.tab) this.tab = p.tab;
+    if (p.tab) {
+      this.tab = p.tab;
+      if (p.tab !== "today") this.lastTab = p.tab;
+    }
     if (p.groupBy) this.groupBy = p.groupBy;
     if (p.sortBy && p.sortBy in SORTS) this.sortBy = p.sortBy;
     if (Array.isArray(p.collapsed)) this.collapsed = Object.fromEntries(p.collapsed.map((k) => [k, true]));
@@ -275,12 +290,15 @@ class Store {
     return [...groups.values()];
   });
 
-  /** Open-item counts per tab id ("all", "inbox", or a category id). */
+  /** Open-item counts per tab id ("today", "all", "inbox", or a category id). */
   counts: Record<string, number> = $derived.by(() => {
-    const c: Record<string, number> = { all: 0, inbox: 0 };
+    const c: Record<string, number> = { today: 0, all: 0, inbox: 0 };
     for (const it of this.items) {
       if (it.completed || !this.matchesSource(it)) continue;
       c.all++;
+      // The Today badge counts what needs doing, so events aren't in it.
+      const bucket = dueBucket(it.due);
+      if (bucket === "overdue" || bucket === "today") c.today++;
       if (it.categories.length === 0) c.inbox++;
       for (const cat of it.categories) c[cat] = (c[cat] ?? 0) + 1;
     }
@@ -291,15 +309,14 @@ class Store {
   private eventOverrides = $state<Record<string, Partial<CalendarEvent>>>({});
 
   /**
-   * Events for the Calendar views: the current area tab and search apply;
-   * the Reminders/GitHub source filters hide them.
+   * Every area's events, with optimistic edits and the search applied; the
+   * Reminders/GitHub source filters hide them.
    */
-  visibleEvents: CalendarEvent[] = $derived.by(() => {
-    if (!this.showEvents || this.sourceFilter !== "all") return [];
+  private searchedEvents: CalendarEvent[] = $derived.by(() => {
+    if (this.sourceFilter !== "all") return [];
     const q = this.query.trim().toLowerCase();
     return (this.snap?.events ?? [])
       .map((e) => (this.eventOverrides[e.id] ? { ...e, ...this.eventOverrides[e.id] } : e))
-      .filter((e) => this.inTab(e, this.tab))
       .filter(
         (e) =>
           !q ||
@@ -309,9 +326,62 @@ class Store {
       );
   });
 
+  /** Events for the Calendar views: the current area tab applies, and the eye toggle. */
+  visibleEvents: CalendarEvent[] = $derived(
+    this.showEvents ? this.searchedEvents.filter((e) => this.inTab(e, this.tab)) : [],
+  );
+
   visible: Item[] = $derived.by(() =>
     this.items.filter((it) => this.inTab(it, this.tab) && this.matches(it)).sort(SORTS[this.sortBy]),
   );
+
+  // ---- Today ----------------------------------------------------------------
+  // The Today view answers "what am I doing today" across every area, so these
+  // lists deliberately ignore the area tab. Search and the source filters still
+  // apply, since their controls sit in the header on this screen too.
+
+  /** Events touching today, all-day ones first, then in start order. */
+  todayEvents: CalendarEvent[] = $derived.by(() => {
+    const today = todayStr();
+    return this.searchedEvents
+      .filter((e) => eventDays(e).includes(today))
+      .sort((a, b) => Number(b.allDay) - Number(a.allDay) || a.start.localeCompare(b.start));
+  });
+
+  /** Items due today, in every area. A time that has passed counts as overdue. */
+  dueToday: Item[] = $derived.by(() =>
+    this.items.filter((it) => this.matches(it) && dueBucket(it.due) === "today").sort(SORTS.due),
+  );
+
+  /** Items past their due date, in every area, longest overdue first. */
+  overdue: Item[] = $derived.by(() =>
+    this.items.filter((it) => this.matches(it) && dueBucket(it.due) === "overdue").sort(SORTS.due),
+  );
+
+  /** The Today view's blocks, in screen order; empty ones are left out. */
+  todaySections: TodaySection[] = $derived(
+    [
+      { key: "today:events", title: "Schedule", icon: "calendar", events: this.todayEvents, items: [] },
+      { key: "today:due", title: "Due today", icon: "flag", events: [], items: this.dueToday },
+      { key: "today:overdue", title: "Overdue", icon: "alert", events: [], items: this.overdue },
+    ].filter((s) => s.events.length || s.items.length),
+  );
+
+  /** The tab to come back to when leaving Today; Today itself is never it. */
+  private lastTab = "all";
+
+  setTab(tab: string) {
+    if (tab !== "today") this.lastTab = tab;
+    this.tab = tab;
+    this.selectedId = null;
+    this.menuFor = null;
+    this.savePrefs();
+  }
+
+  /** Today is a tab rather than a view, so V steps back to the tab you came from. */
+  leaveToday() {
+    this.setTab(this.lastTab === "today" ? "all" : this.lastTab);
+  }
 
   setSort(sortBy: SortBy) {
     this.sortBy = sortBy;

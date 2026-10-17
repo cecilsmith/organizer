@@ -128,7 +128,7 @@
       {#if item.assignees.length}
         <span class="faint">@{item.assignees.join(", @")}</span>
       {/if}
-      {#if store.tab === "all" || store.tab === "inbox"}
+      {#if store.tab === "all" || store.tab === "inbox" || store.tab === "today"}
         {#each cats as c (c.id)}
           <span class="cat" style:--c={c.color}>{c.name}</span>
         {/each}
