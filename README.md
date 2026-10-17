@@ -5,7 +5,7 @@ A macOS app that puts your Apple Reminders, calendars, and GitHub and GitLab wor
 - **Apple Reminders:** reads and writes your reminders directly through EventKit. Changes you make in the Reminders app show up here right away.
 - **Calendars:** events from every calendar on your Mac (iCloud, plus Google/Gmail and Outlook/Microsoft 365 accounts added in System Settings → Internet Accounts) appear in the Calendar views with their real durations. Create them from quick-add, edit them in a side panel, drag them to another time or day, and drag their bottom edge to change when they end. Repeating events change one occurrence at a time.
 - **GitHub:** link several accounts (github.com or Enterprise), then track any number of repositories (open issues) and Projects (issues, PRs and drafts, with their Status).
-- **GitLab:** link gitlab.com or self-managed accounts with a personal access token (`api` scope) and track any number of projects. Issues get areas from labels like GitHub issues do, can be created, closed, edited and relabeled, and their due dates can be changed in the editor, Calendar and Gantt chart.
+- **GitLab:** link gitlab.com or self-managed accounts — imported from the `glab` CLI or with a personal access token (`api` scope) — and track any number of projects. Issues get areas from labels like GitHub issues do, can be created, closed, edited and relabeled, and their due dates can be changed in the editor, Calendar and Gantt chart.
 - **Areas from labels:** an item goes into an area when it has that area's label. On GitHub that's an issue label like `school`. In Reminders it's a hashtag like `#school` in the title or notes. Anything without a label falls back to the default area of its list, repo or project. Items with no area at all go to the **Inbox**.
 - **Edit in place:** double-click any item (or select it and press Enter) to edit it in a side panel. For reminders you can change the title, notes, list, due date, time and priority. For issues and PRs you can change the title, description, labels and assignees, and for project drafts the title and body. Changing the area edits the right thing underneath: GitHub labels, or a reminder's list or hashtag.
 - **Calendar:** switch from List to Calendar (or press `V`) for Month, Week and Day views of everything with a date. Timed reminders appear at their time; GitHub issues use their milestone due date or a date field from their Project (e.g. "Due" or "Target date"). Drag reminders between days or onto an hour to reschedule them, drag them from the "No date" tray to schedule them, and double-click a day or time slot to add a to-do there.
@@ -22,7 +22,7 @@ src-tauri/            Rust backend (Tauri 2)
   src/db.rs           SQLite cache + config (rusqlite, WAL)
   src/categorize.rs   label / hashtag / default → area rules
   src/app.rs          snapshot merging, background sync, actions
-  src/secrets.rs      Keychain token storage, gh CLI import
+  src/secrets.rs      Keychain token storage, gh / glab CLI import
 src/                  Svelte 5 frontend
 ```
 
@@ -32,7 +32,7 @@ Performance comes from three things:
 - Syncs run in the background: GitHub every 2 minutes and whenever the window regains focus, with up to 6 sources in parallel. Reminders sync when EventKit sends a change notification.
 - Completing an item or changing its area updates the screen immediately. The change is undone if the sync fails.
 
-GitHub tokens are stored in the macOS Keychain, never in the database.
+GitHub and GitLab tokens are stored in the macOS Keychain, never in the database.
 
 ## Run it
 
@@ -68,7 +68,13 @@ Open **Settings** (⌘,).
 
    The `project` scope is also what lets the Gantt chart write dates back to your projects.
 
-   For GitLab, paste a personal access token with the `api` scope (change the host for a self-managed server).
+   For GitLab, click **Import glab accounts** to use every host the `glab` CLI is logged into:
+
+   ```bash
+   glab auth login
+   ```
+
+   Or paste a personal access token with the `api` scope (change the host for a self-managed server).
 3. **Repositories / Projects:** browse or paste `owner/repo`, a GitLab `group/project`, or a URL, and pick a default area.
 4. **Areas:** rename areas, recolor them, change their labels, or add new ones.
 5. **Display:** choose whether reminder notes show under every reminder (first two lines) or only for the one you've selected, and whether calendar weeks start on Sunday or Monday.
