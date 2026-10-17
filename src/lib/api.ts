@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type ItemKind = "reminder" | "issue" | "pullRequest" | "draftIssue";
 export type Provider = "github" | "gitlab";
+export type TokenSource = "keychain" | "cli";
 
 export interface Category {
   id: string;
@@ -19,6 +20,8 @@ export interface Account {
   avatarUrl: string | null;
   scopes: string[];
   provider: Provider;
+  /** "cli" tokens are re-read from `gh`/`glab` each run and never stored. */
+  tokenSource: TokenSource;
 }
 
 export interface Repo {

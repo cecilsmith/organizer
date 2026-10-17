@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::error::{Error, Result};
-use crate::model::{Account, Candidate, Item, ItemKind, Label, Project, ProjectDates, Provider, Repo, SubIssues};
+use crate::model::{Account, Candidate, Item, ItemKind, Label, Project, ProjectDates, Provider, Repo, SubIssues, TokenSource};
 
 /// Bodies are only used for search and previews; cap them to keep the cache lean.
 const MAX_BODY: usize = 4000;
@@ -194,6 +194,8 @@ impl GitHub {
             avatar_url: v["avatarUrl"].as_str().map(Into::into),
             scopes,
             provider: Provider::Github,
+            // Set by the caller, which knows whether the token was pasted or imported.
+            token_source: TokenSource::default(),
         })
     }
 

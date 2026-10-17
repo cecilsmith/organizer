@@ -1,37 +1,68 @@
-//! GitHub and GitLab tokens live in the macOS Keychain, never in the SQLite file.
-//! Reads are cached in memory so the Keychain is only touched once per account.
+//! Account tokens. A pasted token lives in the macOS Keychain, never in the
+//! SQLite file; a token imported from `gh` or `glab` isn't stored at all, since
+//! those CLIs already hold it — it is re-read from them once per run.
+//!
+//! Either way a token is read once per run and kept in memory, so the Keychain
+//! is touched at most once per account — each touch of an item this build
+//! didn't create raises a macOS confirmation dialog.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use crate::error::{Error, Result};
+use crate::model::{Account, Provider, TokenSource};
 
 const SERVICE: &str = "com.nathanaelsmith.organizer.github";
 
 #[derive(Default)]
 pub struct Secrets {
     cache: RwLock<HashMap<String, String>>,
+    /// Held while a token is loaded, so that concurrent syncs of the same
+    /// account raise one Keychain dialog between them rather than one each.
+    loading: Mutex<()>,
 }
 
 impl Secrets {
-    pub fn get(&self, account_id: &str) -> Result<String> {
-        if let Some(t) = self.cache.read().unwrap().get(account_id) {
-            return Ok(t.clone());
+    /// The token for `account`, loaded once per run and cached in memory.
+    pub fn token(&self, account: &Account) -> Result<String> {
+        if let Some(t) = self.cached(&account.id) {
+            return Ok(t);
         }
-        let token = keychain::get(account_id)?
-            .ok_or_else(|| Error::msg(format!("No token stored for {account_id}. Re-link the account.")))?;
-        self.cache.write().unwrap().insert(account_id.into(), token.clone());
+        let _loading = self.loading.lock().unwrap_or_else(|e| e.into_inner());
+        // Another task may have loaded it while we waited.
+        if let Some(t) = self.cached(&account.id) {
+            return Ok(t);
+        }
+        let token = match account.token_source {
+            TokenSource::Cli => match account.provider {
+                Provider::Github => gh_cli_token(&account.host, &account.login)?,
+                Provider::Gitlab => glab_cli_token(&account.host)?,
+            },
+            TokenSource::Keychain => keychain::get(&account.id)?.ok_or_else(|| {
+                Error::msg(format!("No token stored for {}. Re-link the account.", account.id))
+            })?,
+        };
+        self.remember(&account.id, &token);
         Ok(token)
+    }
+
+    fn cached(&self, account_id: &str) -> Option<String> {
+        self.cache.read().unwrap_or_else(|e| e.into_inner()).get(account_id).cloned()
+    }
+
+    /// Keeps a token for this run without storing it anywhere.
+    pub fn remember(&self, account_id: &str, token: &str) {
+        self.cache.write().unwrap_or_else(|e| e.into_inner()).insert(account_id.into(), token.into());
     }
 
     pub fn set(&self, account_id: &str, token: &str) -> Result<()> {
         keychain::set(account_id, token)?;
-        self.cache.write().unwrap().insert(account_id.into(), token.into());
+        self.remember(account_id, token);
         Ok(())
     }
 
     pub fn delete(&self, account_id: &str) -> Result<()> {
-        self.cache.write().unwrap().remove(account_id);
+        self.cache.write().unwrap_or_else(|e| e.into_inner()).remove(account_id);
         keychain::delete(account_id)
     }
 }

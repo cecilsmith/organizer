@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS categories (
 );
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY, login TEXT NOT NULL, host TEXT NOT NULL,
-    name TEXT, avatar_url TEXT, scopes TEXT NOT NULL DEFAULT ''
+    name TEXT, avatar_url TEXT, scopes TEXT NOT NULL DEFAULT '',
+    token_source TEXT NOT NULL DEFAULT 'keychain'
 );
 CREATE TABLE IF NOT EXISTS repos (
     id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -82,6 +83,10 @@ fn migrate(conn: &Connection) -> Result<()> {
         if !has_column(table, "provider")? {
             conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN provider TEXT NOT NULL DEFAULT 'github'"))?;
         }
+    }
+    // Accounts linked before CLI tokens were kept out of the Keychain.
+    if !has_column("accounts", "token_source")? {
+        conn.execute_batch("ALTER TABLE accounts ADD COLUMN token_source TEXT NOT NULL DEFAULT 'keychain'")?;
     }
     Ok(())
 }
@@ -170,7 +175,8 @@ impl Db {
     pub fn accounts(&self) -> Result<Vec<Account>> {
         let conn = self.conn();
         let mut st = conn.prepare_cached(
-            "SELECT id, login, host, name, avatar_url, scopes, provider FROM accounts ORDER BY provider, login",
+            "SELECT id, login, host, name, avatar_url, scopes, provider, token_source
+             FROM accounts ORDER BY provider, login",
         )?;
         let rows = st.query_map([], |r| {
             let scopes: String = r.get(5)?;
@@ -182,6 +188,7 @@ impl Db {
                 avatar_url: r.get(4)?,
                 scopes: scopes.split(',').filter(|s| !s.is_empty()).map(Into::into).collect(),
                 provider: Provider::parse(&r.get::<_, String>(6)?),
+                token_source: TokenSource::parse(&r.get::<_, String>(7)?),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -193,9 +200,19 @@ impl Db {
 
     pub fn upsert_account(&self, a: &Account) -> Result<()> {
         self.conn().execute(
-            "INSERT INTO accounts (id, login, host, name, avatar_url, scopes, provider) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(id) DO UPDATE SET name = ?4, avatar_url = ?5, scopes = ?6, provider = ?7",
-            params![a.id, a.login, a.host, a.name, a.avatar_url, a.scopes.join(","), a.provider.as_str()],
+            "INSERT INTO accounts (id, login, host, name, avatar_url, scopes, provider, token_source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET name = ?4, avatar_url = ?5, scopes = ?6, provider = ?7, token_source = ?8",
+            params![
+                a.id,
+                a.login,
+                a.host,
+                a.name,
+                a.avatar_url,
+                a.scopes.join(","),
+                a.provider.as_str(),
+                a.token_source.as_str()
+            ],
         )?;
         Ok(())
     }
@@ -561,6 +578,7 @@ mod tests {
             avatar_url: None,
             scopes: vec!["repo".into()],
             provider: Provider::Github,
+            token_source: TokenSource::Keychain,
         };
         db.upsert_account(&acct).unwrap();
         db.upsert_repo(&Repo {
@@ -600,7 +618,31 @@ mod tests {
         migrate(&conn).unwrap();
         migrate(&conn).unwrap(); // idempotent
         let db = Db { conn: Mutex::new(conn) };
-        assert_eq!(db.accounts().unwrap()[0].provider, Provider::Github);
+        let a = &db.accounts().unwrap()[0];
+        assert_eq!(a.provider, Provider::Github);
+        // An account linked before CLI imports keeps its Keychain token.
+        assert_eq!(a.token_source, TokenSource::Keychain);
+    }
+
+    #[test]
+    fn remembers_where_an_account_keeps_its_token() {
+        let db = Db::in_memory().unwrap();
+        let mut a = Account {
+            id: "me@gitlab.com".into(),
+            login: "me".into(),
+            host: "gitlab.com".into(),
+            name: None,
+            avatar_url: None,
+            scopes: vec![],
+            provider: Provider::Gitlab,
+            token_source: TokenSource::Cli,
+        };
+        db.upsert_account(&a).unwrap();
+        assert_eq!(db.account(&a.id).unwrap().unwrap().token_source, TokenSource::Cli);
+        // Re-linking by pasting a token moves it back to the Keychain.
+        a.token_source = TokenSource::Keychain;
+        db.upsert_account(&a).unwrap();
+        assert_eq!(db.account(&a.id).unwrap().unwrap().token_source, TokenSource::Keychain);
     }
 
     #[test]
