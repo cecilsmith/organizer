@@ -319,23 +319,15 @@ impl GitHub {
         filter: &str,
         since: Value,
     ) -> Result<Vec<Item>> {
-        let query = format!(
-            r#"query($o: String!, $n: String!, $after: String, $since: DateTime) {{ repository(owner: $o, name: $n) {{
-                issues({filter}, first: 100, after: $after, orderBy: {{ field: UPDATED_AT, direction: DESC }}) {{
-                  pageInfo {{ hasNextPage endCursor }}
-                  nodes {{ ...IssueFields }} }} }} }} {ISSUE_FIELDS}"#
-        );
+        let query = issues_query(filter);
         let mut items = Vec::new();
         let mut after = Value::Null;
         for _ in 0..MAX_PAGES {
-            let data = self
-                .graphql(
-                    host,
-                    token,
-                    &query,
-                    json!({ "o": repo.owner, "n": repo.name, "after": after, "since": since }),
-                )
-                .await?;
+            let mut vars = json!({ "o": repo.owner, "n": repo.name, "after": after });
+            if !since.is_null() {
+                vars["since"] = since.clone();
+            }
+            let data = self.graphql(host, token, &query, vars).await?;
             let conn = &data["repository"]["issues"];
             if conn.is_null() {
                 return Err(Error::GitHub(format!("{} is not accessible", repo.full_name())));
@@ -910,6 +902,19 @@ fn content_item(n: &Value, account_id: &str) -> Option<Item> {
     })
 }
 
+/// One page of a repo's issues, with `filter` spliced into the connection.
+/// `$since` is only declared when the filter uses it: GraphQL rejects an
+/// operation that declares a variable it never mentions.
+fn issues_query(filter: &str) -> String {
+    let since = if filter.contains("$since") { ", $since: DateTime" } else { "" };
+    format!(
+        r#"query($o: String!, $n: String!, $after: String{since}) {{ repository(owner: $o, name: $n) {{
+                issues({filter}, first: 100, after: $after, orderBy: {{ field: UPDATED_AT, direction: DESC }}) {{
+                  pageInfo {{ hasNextPage endCursor }}
+                  nodes {{ ...IssueFields }} }} }} }} {ISSUE_FIELDS}"#
+    )
+}
+
 /// Adds a hint when GitHub rejects a request for lack of the `project` scope.
 fn explain_scopes(msg: String) -> String {
     if msg.contains("read:project") || msg.contains("'project'") || msg.contains("required scopes") {
@@ -925,6 +930,15 @@ fn explain_scopes(msg: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declares_the_since_variable_only_where_it_is_used() {
+        let open = issues_query("states: OPEN");
+        assert!(!open.contains("$since"), "an unused variable fails GraphQL validation");
+        assert!(open.contains("issues(states: OPEN, first: 100"));
+        let closed = issues_query("states: CLOSED, filterBy: { since: $since }");
+        assert!(closed.contains("$after: String, $since: DateTime)"));
+    }
 
     #[test]
     fn parses_issue_and_pr_nodes() {

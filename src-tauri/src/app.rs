@@ -1209,7 +1209,7 @@ fn merge_copies(rows: Vec<(String, Item)>) -> Vec<Item> {
                     base.due = base.due.or(other.due);
                 }
                 base.completed |= other.completed;
-        base.completed_at = base.completed_at.or(other.completed_at);
+                base.completed_at = base.completed_at.or(other.completed_at);
                 *existing = base;
             }
         }
