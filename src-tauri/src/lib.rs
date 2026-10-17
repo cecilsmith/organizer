@@ -26,10 +26,10 @@ pub fn run() {
         // Restores the window's size and position from the last run.
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
-            if let Some(win) = app.get_webview_window("main") {
-                if let Err(e) = keep_on_screen(&win) {
-                    tracing::warn!("couldn't check the window's position: {e}");
-                }
+            if let Some(win) = app.get_webview_window("main")
+                && let Err(e) = keep_on_screen(&win)
+            {
+                tracing::warn!("couldn't check the window's position: {e}");
             }
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
