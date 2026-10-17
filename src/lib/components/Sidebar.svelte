@@ -11,8 +11,7 @@
   );
 
   function select(tab: string) {
-    store.tab = tab;
-    store.savePrefs();
+    store.setTab(tab);
   }
 </script>
 
@@ -20,6 +19,16 @@
   <div class="titlebar" data-tauri-drag-region></div>
 
   <nav>
+    <button
+      class="tab"
+      class:active={store.tab === "today"}
+      onclick={() => select("today")}
+      title="⌘1 · today's events, what's due and what's overdue, across every area"
+    >
+      <Icon name="sun" />
+      <span class="name">Today</span>
+      <span class="count">{store.counts.today || ""}</span>
+    </button>
     <button class="tab" class:active={store.tab === "all"} onclick={() => select("all")}>
       <Icon name="stack" />
       <span class="name">All</span>
@@ -37,7 +46,7 @@
         class="tab"
         class:active={store.tab === c.id}
         onclick={() => select(c.id)}
-        title={`⌘${i + 3} · items labeled “${c.label}”`}
+        title={`⌘${i + 4} · items labeled “${c.label}”`}
       >
         <span class="dot" style:background={c.color}></span>
         <span class="name">{c.name}</span>
