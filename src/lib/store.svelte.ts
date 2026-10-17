@@ -12,6 +12,7 @@ import { addDays, addMonths, parseYmd, ymd } from "./dates";
 
 export type SourceFilter = "all" | "reminders" | "github";
 export type GroupBy = "source" | "due";
+export type SortBy = "due" | "priority" | "title" | "updated" | "container";
 /** Whether reminder notes show under every row, or only the selected one. */
 export type ShowNotes = "always" | "selected";
 export type View = "list" | "calendar" | "gantt";
@@ -45,6 +46,9 @@ const PREFS_KEY = "organizer.prefs";
 interface Prefs {
   tab: string;
   groupBy: GroupBy;
+  sortBy: SortBy;
+  /** Keys of the list-view groups that are collapsed. */
+  collapsed: string[];
   sourceFilter: SourceFilter;
   showNotes: ShowNotes;
   view: View;
@@ -70,6 +74,9 @@ class Store {
   query = $state("");
   sourceFilter = $state<SourceFilter>("all");
   groupBy = $state<GroupBy>("source");
+  sortBy = $state<SortBy>("due");
+  /** Collapsed list-view groups, by group key. */
+  collapsed = $state<Record<string, boolean>>({});
   showNotes = $state<ShowNotes>("selected");
   view = $state<View>("list");
   calView = $state<CalView>("month");
@@ -115,6 +122,8 @@ class Store {
     const p = loadPrefs();
     if (p.tab) this.tab = p.tab;
     if (p.groupBy) this.groupBy = p.groupBy;
+    if (p.sortBy && p.sortBy in SORTS) this.sortBy = p.sortBy;
+    if (Array.isArray(p.collapsed)) this.collapsed = Object.fromEntries(p.collapsed.map((k) => [k, true]));
     if (p.showNotes) this.showNotes = p.showNotes;
     if (p.view) this.view = p.view;
     if (p.calView) this.calView = p.calView;
@@ -133,6 +142,8 @@ class Store {
         JSON.stringify({
           tab: this.tab,
           groupBy: this.groupBy,
+          sortBy: this.sortBy,
+          collapsed: Object.keys(this.collapsed).filter((k) => this.collapsed[k]),
           sourceFilter: this.sourceFilter,
           showNotes: this.showNotes,
           view: this.view,
@@ -249,8 +260,20 @@ class Store {
   });
 
   visible: Item[] = $derived.by(() =>
-    this.items.filter((it) => this.inTab(it, this.tab) && this.matches(it)).sort(compareItems),
+    this.items.filter((it) => this.inTab(it, this.tab) && this.matches(it)).sort(SORTS[this.sortBy]),
   );
+
+  setSort(sortBy: SortBy) {
+    this.sortBy = sortBy;
+    this.savePrefs();
+  }
+
+  /** Folds a list-view group away; the choice is remembered across restarts. */
+  toggleGroup(key: string) {
+    if (this.collapsed[key]) delete this.collapsed[key];
+    else this.collapsed[key] = true;
+    this.savePrefs();
+  }
 
   inTab(item: { categories: string[] }, tab: string) {
     if (tab === "all") return true;
@@ -557,6 +580,26 @@ class Store {
   }
 }
 
+/** 0 means "no priority", which sorts after every real one. */
+const prio = (i: Item) => i.priority || 10;
+
+export const SORT_NAMES: Record<SortBy, string> = {
+  due: "Due date",
+  priority: "Priority",
+  title: "Title",
+  updated: "Last updated",
+  container: "List / repo",
+};
+
+/** Each sort falls back to the due-date order so equal keys stay stable. */
+const SORTS: Record<SortBy, (a: Item, b: Item) => number> = {
+  due: (a, b) => compareItems(a, b),
+  priority: (a, b) => prio(a) - prio(b) || compareItems(a, b),
+  title: (a, b) => a.title.localeCompare(b.title) || compareItems(a, b),
+  updated: (a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "") || compareItems(a, b),
+  container: (a, b) => a.containerName.localeCompare(b.containerName) || compareItems(a, b),
+};
+
 /** Due date first (soonest, undated last), then priority, then most recently updated. */
 function compareItems(a: Item, b: Item) {
   if (a.due !== b.due) {
@@ -564,9 +607,7 @@ function compareItems(a: Item, b: Item) {
     if (!b.due) return -1;
     return a.due < b.due ? -1 : 1;
   }
-  const pa = a.priority || 10;
-  const pb = b.priority || 10;
-  if (pa !== pb) return pa - pb;
+  if (prio(a) !== prio(b)) return prio(a) - prio(b);
   return (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "");
 }
 
