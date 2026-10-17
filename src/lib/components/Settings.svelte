@@ -191,13 +191,21 @@
         <h3>Accounts</h3>
         <p class="muted">
           Link as many GitHub and GitLab accounts as you like — personal, work, school, GitHub Enterprise or a
-          self-managed GitLab. Tokens are stored in your macOS Keychain.
+          self-managed GitLab. Imported accounts re-read their token from <code>gh</code> or <code>glab</code> each
+          time Organizer starts; a token you paste is stored in your macOS Keychain.
         </p>
         {#each snap?.accounts ?? [] as a (a.id)}
           <div class="card account">
             {#if a.avatarUrl}<img src={a.avatarUrl} alt="" />{:else}<Icon name={a.provider} size={22} />{/if}
             <div class="grow">
-              <div><strong>{a.name ?? a.login}</strong> <span class="faint">{a.login}@{a.host}</span></div>
+              <div>
+                <strong>{a.name ?? a.login}</strong> <span class="faint">{a.login}@{a.host}</span>
+                <span class="faint" title={a.tokenSource === "cli"
+                  ? `Token read from the ${a.provider === "gitlab" ? "glab" : "gh"} CLI at launch — nothing is stored in your Keychain.`
+                  : "Token stored in your macOS Keychain."}>
+                  · {a.tokenSource === "cli" ? (a.provider === "gitlab" ? "via glab" : "via gh") : "Keychain"}
+                </span>
+              </div>
               {#if a.provider === "github" && a.scopes.length && !a.scopes.some((s) => s.includes("project"))}
                 <div class="warn"><Icon name="alert" size={12} /> Missing the <code>project</code> scope — Projects won't load.</div>
               {/if}

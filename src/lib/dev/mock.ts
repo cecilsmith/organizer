@@ -69,8 +69,8 @@ const calendars = [
 const snap: Snapshot = {
   categories,
   accounts: [
-    { id: "octo@github.com", login: "octo", host: "github.com", name: "Octo Cat", avatarUrl: null, scopes: ["repo"], provider: "github" },
-    { id: "sam@gitlab.com", login: "sam", host: "gitlab.com", name: "Sam", avatarUrl: null, scopes: ["api"], provider: "gitlab" },
+    { id: "octo@github.com", login: "octo", host: "github.com", name: "Octo Cat", avatarUrl: null, scopes: ["repo"], provider: "github", tokenSource: "keychain" },
+    { id: "sam@gitlab.com", login: "sam", host: "gitlab.com", name: "Sam", avatarUrl: null, scopes: ["api"], provider: "gitlab", tokenSource: "cli" },
   ],
   repos: [
     { id: "R1", accountId: "octo@github.com", owner: "octo", name: "thesis", url: "", defaultCategory: "school", provider: "github" },

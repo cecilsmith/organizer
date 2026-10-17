@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::error::{Error, Result};
 use crate::github::cached_body;
-use crate::model::{Account, Candidate, Item, ItemKind, Label, Provider, Repo};
+use crate::model::{Account, Candidate, Item, ItemKind, Label, Provider, Repo, TokenSource};
 
 const MAX_PAGES: usize = 10;
 
@@ -184,6 +184,8 @@ impl GitLab {
             avatar_url: v["avatar_url"].as_str().map(Into::into),
             scopes,
             provider: Provider::Gitlab,
+            // Set by the caller, which knows whether the token was pasted or imported.
+            token_source: TokenSource::default(),
         })
     }
 

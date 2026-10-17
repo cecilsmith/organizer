@@ -213,7 +213,7 @@ impl App {
         let Some(_guard) = self.begin_sync(&id) else { return };
         let res = async {
             let account = self.account(source.account_id())?;
-            let token = self.secrets.get(&account.id)?;
+            let token = self.secrets.token(&account)?;
             let items = match &source {
                 SourceRef::Repo(r) if r.provider == Provider::Gitlab => self.gl.issues(&account.host, &token, r).await?,
                 SourceRef::Repo(r) => self.gh.repo_issues(&account.host, &token, r).await?,
@@ -282,20 +282,42 @@ impl App {
 
     fn account_token(&self, id: &str) -> Result<(Account, String)> {
         let a = self.account(id)?;
-        let t = self.secrets.get(&a.id)?;
+        let t = self.secrets.token(&a)?;
         Ok((a, t))
     }
 
+    /// Links an account from a token the user pasted, which goes in the Keychain.
     pub async fn add_account(&self, token: &str, host: &str, provider: Provider) -> Result<Account> {
+        self.link_account(token, host, provider, TokenSource::Keychain).await
+    }
+
+    async fn link_account(
+        &self,
+        token: &str,
+        host: &str,
+        provider: Provider,
+        source: TokenSource,
+    ) -> Result<Account> {
         let token = token.trim();
         if token.is_empty() {
             return Err(Error::msg("paste a token first"));
         }
-        let account = match provider {
+        let mut account = match provider {
             Provider::Github => self.gh.viewer(&normalize_host(host), token).await?,
             Provider::Gitlab => self.gl.viewer(&normalize_gitlab_host(host), token).await?,
         };
-        self.secrets.set(&account.id, token)?;
+        account.token_source = source;
+        match source {
+            TokenSource::Keychain => self.secrets.set(&account.id, token)?,
+            // `gh`/`glab` hold the credential; keep it for this run only, and
+            // drop anything an earlier link left in the Keychain. That delete
+            // can fail when the item was written by another build, which is
+            // the one thing we don't want to block the import on.
+            TokenSource::Cli => {
+                let _ = self.secrets.delete(&account.id);
+                self.secrets.remember(&account.id, token);
+            }
+        }
         self.db.upsert_account(&account)?;
         self.changed();
         Ok(account)
@@ -318,7 +340,7 @@ impl App {
                 .await
                 .map_err(|e| Error::msg(e.to_string()))?;
             let line = match token {
-                Ok(t) => match self.add_account(&t, &host, Provider::Github).await {
+                Ok(t) => match self.link_account(&t, &host, Provider::Github, TokenSource::Cli).await {
                     Ok(a) if a.scopes.is_empty() || a.scopes.iter().any(|s| s.contains("project")) => {
                         format!("✓ {}", a.id)
                     }
@@ -352,7 +374,7 @@ impl App {
                 .await
                 .map_err(|e| Error::msg(e.to_string()))?;
             let line = match token {
-                Ok(t) => match self.add_account(&t, &host, Provider::Gitlab).await {
+                Ok(t) => match self.link_account(&t, &host, Provider::Gitlab, TokenSource::Cli).await {
                     Ok(a) if a.scopes.is_empty() || a.scopes.iter().any(|s| s == "api") => format!("✓ {}", a.id),
                     Ok(a) => format!(
                         "✓ {} — no `api` scope, so issues won't load. Run `glab auth login --hostname {host}` with an `api` token.",

@@ -36,6 +36,30 @@ impl Provider {
     }
 }
 
+/// Where an account's token comes from. A `Cli` account's token belongs to
+/// `gh` or `glab`: it is re-read from them at launch and held in memory for
+/// that run only, so nothing goes in the Keychain and nothing outlives the app.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenSource {
+    #[default]
+    Keychain,
+    Cli,
+}
+
+impl TokenSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TokenSource::Keychain => "keychain",
+            TokenSource::Cli => "cli",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        if s == "cli" { TokenSource::Cli } else { TokenSource::Keychain }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -48,6 +72,8 @@ pub struct Account {
     pub scopes: Vec<String>,
     #[serde(default)]
     pub provider: Provider,
+    #[serde(default)]
+    pub token_source: TokenSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

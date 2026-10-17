@@ -32,7 +32,10 @@ Performance comes from three things:
 - Syncs run in the background: GitHub every 2 minutes and whenever the window regains focus, with up to 6 sources in parallel. Reminders sync when EventKit sends a change notification.
 - Completing an item or changing its area updates the screen immediately. The change is undone if the sync fails.
 
-GitHub and GitLab tokens are stored in the macOS Keychain, never in the database.
+Tokens never go in the database. A token you paste is stored in the macOS
+Keychain; a token imported from `gh` or `glab` isn't stored at all, since those
+CLIs already hold it — Organizer re-reads it from them at launch and keeps it in
+memory for that run only. Either way a token is read once per run.
 
 ## Run it
 
@@ -53,6 +56,39 @@ Build a `.app` / `.dmg`:
 ```bash
 npm run tauri build
 ```
+
+### Keychain prompts while developing
+
+If macOS keeps asking whether Organizer may use "your confidential information
+stored in com.nathanaelsmith.organizer.github", it's the code signature, not the
+app. `cargo build` leaves the binary ad-hoc signed, and an ad-hoc signature is
+derived from the binary itself, so every rebuild looks like a different app and
+the earlier "Always Allow" no longer applies.
+
+Two ways out, which combine:
+
+- **Import accounts from `gh`/`glab`** instead of pasting tokens. Those accounts
+  keep nothing in the Keychain, so they never prompt. Settings shows which
+  accounts are which.
+- **Give dev builds a signature that stays put.** Create a self-signed
+  certificate once (Keychain Access > Certificate Assistant > Create a
+  Certificate…, identity type "Self Signed Root", certificate type "Code
+  Signing") named `Organizer Dev`, then run:
+
+  ```bash
+  npm run dev:signed
+  ```
+
+  It builds, signs and launches, starting the vite server if it isn't already
+  up. `ORGANIZER_SIGN_IDENTITY` picks a different certificate.
+
+To clear out tokens an earlier build stored, delete them from the Keychain:
+
+```bash
+security delete-generic-password -s com.nathanaelsmith.organizer.github
+```
+
+Repeat it once per account — it deletes one item per run — then re-import.
 
 ## Connect your stuff
 
