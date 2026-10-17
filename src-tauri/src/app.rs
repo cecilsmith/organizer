@@ -335,6 +335,38 @@ impl App {
         Ok(report)
     }
 
+    /// Imports every GitLab host the GitLab CLI is logged into. One line per host.
+    pub async fn import_glab_accounts(&self) -> Result<Vec<String>> {
+        let found = tokio::task::spawn_blocking(secrets::glab_cli_accounts)
+            .await
+            .map_err(|e| Error::msg(e.to_string()))?;
+        if found.is_empty() {
+            return Err(Error::msg(
+                "No GitLab CLI accounts found. Install `glab` and run `glab auth login`, or paste a token instead.",
+            ));
+        }
+        let mut report = Vec::new();
+        for host in found {
+            let h = host.clone();
+            let token = tokio::task::spawn_blocking(move || secrets::glab_cli_token(&h))
+                .await
+                .map_err(|e| Error::msg(e.to_string()))?;
+            let line = match token {
+                Ok(t) => match self.add_account(&t, &host, Provider::Gitlab).await {
+                    Ok(a) if a.scopes.is_empty() || a.scopes.iter().any(|s| s == "api") => format!("✓ {}", a.id),
+                    Ok(a) => format!(
+                        "✓ {} — no `api` scope, so issues won't load. Run `glab auth login --hostname {host}` with an `api` token.",
+                        a.id
+                    ),
+                    Err(e) => format!("✗ {host}: {e}"),
+                },
+                Err(e) => format!("✗ {host}: {e}"),
+            };
+            report.push(line);
+        }
+        Ok(report)
+    }
+
     pub fn remove_account(&self, id: &str) -> Result<()> {
         self.db.delete_account(id)?;
         self.secrets.delete(id)?;

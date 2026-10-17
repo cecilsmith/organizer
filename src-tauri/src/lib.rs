@@ -39,6 +39,7 @@ pub fn run() {
             commands::sync_now,
             commands::add_account,
             commands::import_gh_accounts,
+            commands::import_glab_accounts,
             commands::remove_account,
             commands::repo_candidates,
             commands::project_candidates,

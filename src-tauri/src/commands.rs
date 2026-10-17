@@ -40,6 +40,11 @@ pub async fn import_gh_accounts(app: S<'_>) -> Result<Vec<String>> {
 }
 
 #[tauri::command]
+pub async fn import_glab_accounts(app: S<'_>) -> Result<Vec<String>> {
+    app.import_glab_accounts().await
+}
+
+#[tauri::command]
 pub fn remove_account(app: S<'_>, id: String) -> Result<()> {
     app.remove_account(&id)
 }

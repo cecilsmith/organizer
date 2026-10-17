@@ -216,6 +216,7 @@ export const api = {
   addAccount: (token: string, host: string, provider: Provider) =>
     invoke<Account>("add_account", { token, host, provider }),
   importGhAccounts: () => invoke<string[]>("import_gh_accounts"),
+  importGlabAccounts: () => invoke<string[]>("import_glab_accounts"),
   removeAccount: (id: string) => invoke<void>("remove_account", { id }),
 
   repoCandidates: (accountId: string) => invoke<Candidate[]>("repo_candidates", { accountId }),

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, errorText, type Category } from "$lib/api";
+  import { api, errorText, type Category, type Provider } from "$lib/api";
   import { store, relativeTime } from "$lib/store.svelte";
   import CategorySelect from "./CategorySelect.svelte";
   import Icon from "./Icon.svelte";
@@ -36,7 +36,7 @@
   let token = $state("");
   let host = $state("github.com");
   let linking = $state(false);
-  let importReport = $state<string[]>([]);
+  let importReport = $state<Partial<Record<Provider, string[]>>>({});
   const tokenUrl =
     "https://github.com/settings/tokens/new?scopes=repo,project&description=Organizer%20app";
 
@@ -72,17 +72,19 @@
     }
   }
 
-  async function importGh() {
+  async function runImport(provider: Provider, load: () => Promise<string[]>) {
     linking = true;
-    importReport = [];
+    importReport = { ...importReport, [provider]: [] };
     try {
-      importReport = await api.importGhAccounts();
+      importReport = { ...importReport, [provider]: await load() };
     } catch (e) {
-      importReport = [errorText(e)];
+      importReport = { ...importReport, [provider]: [errorText(e)] };
     } finally {
       linking = false;
     }
   }
+  const importGh = () => runImport("github", api.importGhAccounts);
+  const importGlab = () => runImport("gitlab", api.importGlabAccounts);
 
   async function unlink(id: string) {
     if (!confirmed(`acct:${id}`)) return;
@@ -207,8 +209,8 @@
         <h4><Icon name="github" size={14} /> GitHub — import from the GitHub CLI</h4>
         <p class="muted">Uses every account you're logged into with <code>gh auth login</code>.</p>
         <button class="btn" onclick={importGh} disabled={linking}><Icon name="github" size={14} /> Import gh accounts</button>
-        {#if importReport.length}
-          <ul class="report selectable">{#each importReport as line}<li>{line}</li>{/each}</ul>
+        {#if importReport.github?.length}
+          <ul class="report selectable">{#each importReport.github as line}<li>{line}</li>{/each}</ul>
         {/if}
 
         <h4>GitHub — or paste a personal access token</h4>
@@ -222,7 +224,14 @@
           <button class="btn primary" onclick={link} disabled={!token.trim() || linking}>{linking ? "Linking…" : "Link"}</button>
         </div>
 
-        <h4><Icon name="gitlab" size={14} /> GitLab — paste a personal access token</h4>
+        <h4><Icon name="gitlab" size={14} /> GitLab — import from the GitLab CLI</h4>
+        <p class="muted">Uses every host you're logged into with <code>glab auth login</code>.</p>
+        <button class="btn" onclick={importGlab} disabled={linking}><Icon name="gitlab" size={14} /> Import glab accounts</button>
+        {#if importReport.gitlab?.length}
+          <ul class="report selectable">{#each importReport.gitlab as line}<li>{line}</li>{/each}</ul>
+        {/if}
+
+        <h4>GitLab — or paste a personal access token</h4>
         <p class="muted">
           Needs the <code>api</code> scope. Works with gitlab.com or your own GitLab server.
           <button class="link" onclick={() => api.openUrl(glTokenUrl)}>Create one on {glHost.trim() || "gitlab.com"} →</button>
