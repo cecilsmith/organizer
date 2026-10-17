@@ -72,6 +72,8 @@ export interface Item {
   url: string | null;
   number: number | null;
   completed: boolean;
+  /** When it was completed or closed (RFC 3339); drives the Completed view. */
+  completedAt: string | null;
   due: string | null;
   priority: number;
   labels: Label[];

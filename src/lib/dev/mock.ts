@@ -1,6 +1,7 @@
 // Fake backend for working on the UI in a plain browser (`npm run dev`).
 // Only loaded in dev builds when the page isn't running inside Tauri.
 
+import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type { CalendarEvent, Category, Item, Snapshot } from "$lib/api";
 import { todayStr as day } from "$lib/store.svelte";
@@ -11,6 +12,14 @@ const categories: Category[] = [
   { id: "school", name: "School", color: "#9b6dff", label: "school", position: 2 },
   { id: "fun", name: "Fun", color: "#27ae60", label: "fun", position: 3 },
 ];
+
+/** An RFC 3339 completion time, `daysAgo` days back. */
+function done(daysAgo: number, hour = 15) {
+  const d = new Date();
+  d.setDate(d.getDate() - daysAgo);
+  d.setHours(hour, 0, 0, 0);
+  return d.toISOString();
+}
 
 /** Project date fields for sample items in "Q4 Roadmap". */
 const pd = (n: string) => ({ projectId: "P1", itemId: `PVTI_${n}`, startField: "F_start", dueField: "F_target" });
@@ -25,6 +34,7 @@ function item(p: Partial<Item> & Pick<Item, "id" | "title" | "kind">): Item {
     url: null,
     number: null,
     completed: false,
+    completedAt: null,
     due: null,
     priority: 0,
     labels: [],
@@ -116,6 +126,13 @@ const snap: Snapshot = {
     item({ id: "gh:PR1", kind: "pullRequest", title: "Add Apple Pay", containerId: "R2", containerName: "acme/storefront", number: 240, accountId: "octo@github.com", status: "In review", projectIds: ["P1"], start: day(-2), due: day(3), projectDates: pd("PR1"), categories: ["business"] }),
     item({ id: "gh:I5", kind: "issue", title: "Search revamp", containerId: "R2", containerName: "acme/storefront", number: 250, accountId: "octo@github.com", status: "Todo", projectIds: ["P1"], start: day(14), due: day(27), categories: ["business"] }),
     item({ id: "ghpi:D1", kind: "draftIssue", title: "Plan holiday sale", containerId: "P1", containerName: "Q4 Roadmap", accountId: "octo@github.com", status: "Todo", start: day(10), due: day(24), projectDates: pd("D1"), categories: ["business"] }),
+    // Recently completed: the Completed view's sample data.
+    item({ id: "rem:d1", kind: "reminder", title: "Return library books", containerId: "L1", containerName: "Errands", completed: true, completedAt: done(0, 9), due: day(0), categories: ["personal"] }),
+    item({ id: "rem:d2", kind: "reminder", title: "Problem set 3", containerId: "L2", containerName: "Homework", completed: true, completedAt: done(0, 8), priority: 1, categories: ["school"] }),
+    item({ id: "rem:d3", kind: "reminder", title: "Oil change", containerId: "L1", containerName: "Errands", completed: true, completedAt: done(1, 16), categories: ["personal"] }),
+    item({ id: "gh:I6", kind: "issue", title: "Upgrade the payments SDK", containerId: "R2", containerName: "acme/storefront", number: 228, accountId: "octo@github.com", completed: true, completedAt: done(1, 11), labels: [{ name: "bug", color: "d73a4a" }], categories: ["business"] }),
+    item({ id: "gh:I7", kind: "issue", title: "Draft the methods chapter", containerId: "R1", containerName: "octo/thesis", number: 10, accountId: "octo@github.com", completed: true, completedAt: done(4, 13), categories: ["school"] }),
+    item({ id: "gl:gitlab.com:8990", kind: "issue", provider: "gitlab", title: "Solder the new motor leads", containerId: "gl:gitlab.com:42", containerName: "robotics-club/rover", number: 14, accountId: "sam@gitlab.com", completed: true, completedAt: done(9, 20), categories: ["fun"] }),
   ],
   sources: [
     { sourceId: "reminders", label: "Apple Reminders", lastSynced: new Date().toISOString(), error: null, syncing: false },
@@ -126,135 +143,157 @@ const snap: Snapshot = {
   ],
 };
 
+/** Commands that change something, after which the backend emits `state-changed`. */
+const MUTATIONS = new Set([
+  "set_completed",
+  "set_category",
+  "set_dates",
+  "update_item",
+  "create_item",
+  "discard_item",
+  "create_event",
+  "update_event",
+  "delete_event",
+]);
+
 export function installMock() {
   mockIPC(
     (cmd, args) => {
-      const a = (args ?? {}) as Record<string, unknown>;
-      switch (cmd) {
-        case "get_snapshot":
-          return structuredClone(snap);
-        case "set_completed": {
-          const it = snap.items.find((i) => i.id === a.id);
-          if (it) it.completed = a.completed as boolean;
-          return null;
-        }
-        case "set_dates": {
-          const it = snap.items.find((i) => i.id === a.id);
-          if (!it) throw "item not found";
-          if (typeof a.start === "string") it.start = a.start || null;
-          if (typeof a.due === "string") it.due = a.due || null;
-          return structuredClone(it);
-        }
-        case "create_event": {
-          const req = a.event as { calendarId: string; title: string; start: string; end: string; allDay?: boolean; location?: string; notes?: string };
-          const e = event({ id: `ev:new${Date.now()}`, ...req, allDay: !!req.allDay, location: req.location || null, notes: req.notes || null });
-          snap.events.push(e);
-          return e;
-        }
-        case "update_event": {
-          const e = snap.events.find((x) => x.id === a.id);
-          if (!e) throw "event not found";
-          const p = a.patch as Record<string, unknown>;
-          for (const k of ["title", "start", "end", "allDay", "calendarId"]) if (p[k] !== undefined) (e as any)[k] = p[k];
-          if (typeof p.notes === "string") e.notes = p.notes || null;
-          if (typeof p.location === "string") e.location = p.location || null;
-          if (typeof p.calendarId === "string") {
-            const cal = calendars.find((c) => c.id === p.calendarId)!;
-            Object.assign(e, { calendarName: cal.title, color: cal.color, categories: cal.defaultCategory ? [cal.defaultCategory] : [] });
-          }
-          return structuredClone(e);
-        }
-        case "delete_event": {
-          snap.events = snap.events.filter((x) => x.id !== a.id);
-          return null;
-        }
-        case "request_calendar_access":
-          return "granted";
-        case "discard_item": {
-          snap.items = snap.items.filter((i) => i.id !== a.id);
-          return null;
-        }
-        case "set_category": {
-          const it = snap.items.find((i) => i.id === a.id);
-          if (it) it.categories = a.category ? [a.category as string] : [];
-          return null;
-        }
-        case "item_details": {
-          const it = snap.items.find((i) => i.id === a.id);
-          return new Promise((resolve) =>
-            setTimeout(
-              () =>
-                resolve({
-                  item: structuredClone(it),
-                  labelOptions: [
-                    { name: "bug", color: "d73a4a" },
-                    { name: "enhancement", color: "a2eeef" },
-                    { name: "writing", color: "0e8a16" },
-                    ...categories.map((c) => ({ name: c.label, color: c.color.slice(1) })),
-                  ],
-                  assigneeOptions: ["octo", "hubot", "monalisa"],
-                }),
-              300,
-            ),
-          );
-        }
-        case "update_item": {
-          const it = snap.items.find((i) => i.id === a.id);
-          const p = a.patch as Record<string, unknown>;
-          if (!it) throw "item not found";
-          if (typeof p.title === "string") it.title = p.title;
-          if (typeof p.body === "string") it.body = p.body || null;
-          if (typeof p.due === "string") it.due = p.due || null;
-          if (typeof p.priority === "number") it.priority = p.priority;
-          if (typeof p.listId === "string") {
-            const list = snap.reminderLists.find((l) => l.id === p.listId)!;
-            it.containerId = list.id;
-            it.containerName = list.title;
-          }
-          if (Array.isArray(p.labels)) it.labels = p.labels.map((name: string) => ({ name, color: "ededed" }));
-          if (Array.isArray(p.assignees)) it.assignees = p.assignees as string[];
-          // Re-derive areas the way the backend would.
-          const tags = it.kind === "reminder"
-            ? [...`${it.title} ${it.body ?? ""}`.matchAll(/(?:^|\s)#([\w:-]+)/g)].map((m) => m[1].toLowerCase())
-            : it.labels.map((l) => l.name.toLowerCase());
-          const fromTags = categories.filter((c) => tags.includes(c.label)).map((c) => c.id);
-          const listDefault = snap.reminderLists.find((l) => l.id === it.containerId)?.defaultCategory;
-          const repoDefault = snap.repos.find((r) => r.id === it.containerId)?.defaultCategory;
-          it.categories = fromTags.length ? fromTags : [listDefault ?? repoDefault].filter(Boolean) as string[];
-          return structuredClone(it);
-        }
-        case "create_item": {
-          const req = a.item as {
-            target: string;
-            title: string;
-            listId?: string;
-            repoId?: string;
-            category?: string;
-            due?: string | null;
-            notes?: string | null;
-            body?: string | null;
-            priority?: number;
-          };
-          const list = snap.reminderLists.find((l) => l.id === req.listId);
-          const repo = snap.repos.find((r) => r.id === req.repoId);
-          const it = item({
-            id: `mock:${Date.now()}`,
-            kind: req.target === "reminder" ? "reminder" : "issue",
-            title: req.title,
-            containerId: list?.id ?? repo?.id ?? "",
-            containerName: list?.title ?? `${repo?.owner}/${repo?.name}`,
-            categories: req.category ? [req.category] : [],
-            due: req.due ?? null,
-            body: req.notes ?? req.body ?? null,
-            priority: req.priority ?? 0,
-          });
-          snap.items.push(it);
-          return it;
-        }
-        default:
-          return null;
-      }
+      const result = handle(cmd, (args ?? {}) as Record<string, unknown>);
+      // The real backend tells the UI to re-read the snapshot after every write.
+      if (MUTATIONS.has(cmd)) void emit("state-changed");
+      return result;
     },
     { shouldMockEvents: true },
   );
+}
+
+function handle(cmd: string, a: Record<string, unknown>): unknown {
+  switch (cmd) {
+    case "get_snapshot":
+      return structuredClone(snap);
+    case "set_completed": {
+      const it = snap.items.find((i) => i.id === a.id);
+      if (it) {
+        it.completed = a.completed as boolean;
+        it.completedAt = it.completed ? new Date().toISOString() : null;
+      }
+      return null;
+    }
+    case "set_dates": {
+      const it = snap.items.find((i) => i.id === a.id);
+      if (!it) throw "item not found";
+      if (typeof a.start === "string") it.start = a.start || null;
+      if (typeof a.due === "string") it.due = a.due || null;
+      return structuredClone(it);
+    }
+    case "create_event": {
+      const req = a.event as { calendarId: string; title: string; start: string; end: string; allDay?: boolean; location?: string; notes?: string };
+      const e = event({ id: `ev:new${Date.now()}`, ...req, allDay: !!req.allDay, location: req.location || null, notes: req.notes || null });
+      snap.events.push(e);
+      return e;
+    }
+    case "update_event": {
+      const e = snap.events.find((x) => x.id === a.id);
+      if (!e) throw "event not found";
+      const p = a.patch as Record<string, unknown>;
+      for (const k of ["title", "start", "end", "allDay", "calendarId"]) if (p[k] !== undefined) (e as any)[k] = p[k];
+      if (typeof p.notes === "string") e.notes = p.notes || null;
+      if (typeof p.location === "string") e.location = p.location || null;
+      if (typeof p.calendarId === "string") {
+        const cal = calendars.find((c) => c.id === p.calendarId)!;
+        Object.assign(e, { calendarName: cal.title, color: cal.color, categories: cal.defaultCategory ? [cal.defaultCategory] : [] });
+      }
+      return structuredClone(e);
+    }
+    case "delete_event": {
+      snap.events = snap.events.filter((x) => x.id !== a.id);
+      return null;
+    }
+    case "request_calendar_access":
+      return "granted";
+    case "discard_item": {
+      snap.items = snap.items.filter((i) => i.id !== a.id);
+      return null;
+    }
+    case "set_category": {
+      const it = snap.items.find((i) => i.id === a.id);
+      if (it) it.categories = a.category ? [a.category as string] : [];
+      return null;
+    }
+    case "item_details": {
+      const it = snap.items.find((i) => i.id === a.id);
+      return new Promise((resolve) =>
+        setTimeout(
+          () =>
+            resolve({
+              item: structuredClone(it),
+              labelOptions: [
+                { name: "bug", color: "d73a4a" },
+                { name: "enhancement", color: "a2eeef" },
+                { name: "writing", color: "0e8a16" },
+                ...categories.map((c) => ({ name: c.label, color: c.color.slice(1) })),
+              ],
+              assigneeOptions: ["octo", "hubot", "monalisa"],
+            }),
+          300,
+        ),
+      );
+    }
+    case "update_item": {
+      const it = snap.items.find((i) => i.id === a.id);
+      const p = a.patch as Record<string, unknown>;
+      if (!it) throw "item not found";
+      if (typeof p.title === "string") it.title = p.title;
+      if (typeof p.body === "string") it.body = p.body || null;
+      if (typeof p.due === "string") it.due = p.due || null;
+      if (typeof p.priority === "number") it.priority = p.priority;
+      if (typeof p.listId === "string") {
+        const list = snap.reminderLists.find((l) => l.id === p.listId)!;
+        it.containerId = list.id;
+        it.containerName = list.title;
+      }
+      if (Array.isArray(p.labels)) it.labels = p.labels.map((name: string) => ({ name, color: "ededed" }));
+      if (Array.isArray(p.assignees)) it.assignees = p.assignees as string[];
+      // Re-derive areas the way the backend would.
+      const tags = it.kind === "reminder"
+        ? [...`${it.title} ${it.body ?? ""}`.matchAll(/(?:^|\s)#([\w:-]+)/g)].map((m) => m[1].toLowerCase())
+        : it.labels.map((l) => l.name.toLowerCase());
+      const fromTags = categories.filter((c) => tags.includes(c.label)).map((c) => c.id);
+      const listDefault = snap.reminderLists.find((l) => l.id === it.containerId)?.defaultCategory;
+      const repoDefault = snap.repos.find((r) => r.id === it.containerId)?.defaultCategory;
+      it.categories = fromTags.length ? fromTags : [listDefault ?? repoDefault].filter(Boolean) as string[];
+      return structuredClone(it);
+    }
+    case "create_item": {
+      const req = a.item as {
+        target: string;
+        title: string;
+        listId?: string;
+        repoId?: string;
+        category?: string;
+        due?: string | null;
+        notes?: string | null;
+        body?: string | null;
+        priority?: number;
+      };
+      const list = snap.reminderLists.find((l) => l.id === req.listId);
+      const repo = snap.repos.find((r) => r.id === req.repoId);
+      const it = item({
+        id: `mock:${Date.now()}`,
+        kind: req.target === "reminder" ? "reminder" : "issue",
+        title: req.title,
+        containerId: list?.id ?? repo?.id ?? "",
+        containerName: list?.title ?? `${repo?.owner}/${repo?.name}`,
+        categories: req.category ? [req.category] : [],
+        due: req.due ?? null,
+        body: req.notes ?? req.body ?? null,
+        priority: req.priority ?? 0,
+      });
+      snap.items.push(it);
+      return it;
+    }
+    default:
+      return null;
+  }
 }

@@ -157,6 +157,9 @@ pub struct Item {
     pub url: Option<String>,
     pub number: Option<i64>,
     pub completed: bool,
+    /// When the item was completed or closed (RFC 3339), for the Completed view.
+    #[serde(default)]
+    pub completed_at: Option<String>,
     /// Local date (`2026-10-12`) or local date-time (`2026-10-12T14:30`).
     pub due: Option<String>,
     /// 0 = none, 1 = high, 5 = medium, 9 = low (EventKit convention).
@@ -186,6 +189,16 @@ pub struct Item {
 }
 
 impl Item {
+    /// Whether the item was completed at or after `since` (both RFC 3339). An
+    /// item with no completion time, or one that can't be parsed, counts as older.
+    pub fn completed_since(&self, since: &str) -> bool {
+        let parse = |t: &str| chrono::DateTime::parse_from_rfc3339(t).ok();
+        match (self.completed_at.as_deref().and_then(parse), parse(since)) {
+            (Some(at), Some(since)) => at >= since,
+            _ => false,
+        }
+    }
+
     /// For GitHub items: `owner/repo` and issue number, needed by the REST API.
     pub fn repo_and_number(&self) -> Option<(&str, &str, i64)> {
         let (owner, name) = self.container_name.split_once('/')?;

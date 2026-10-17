@@ -15,6 +15,7 @@
   import EditPanel from "$lib/components/EditPanel.svelte";
   import EventPanel from "$lib/components/EventPanel.svelte";
   import Calendar from "$lib/components/calendar/Calendar.svelte";
+  import Completed from "$lib/components/Completed.svelte";
   import Gantt from "$lib/components/gantt/Gantt.svelte";
   import { sourceIcon } from "$lib/providers";
   import QuickAdd from "$lib/components/QuickAdd.svelte";
@@ -149,7 +150,11 @@
       .map((g) => ({ ...g, rows: nest(g.items, true) }));
   });
 
-  const flat = $derived(groups.flatMap((g) => (store.collapsed[g.key] ? [] : g.rows.map((r) => r.item))));
+  const flat = $derived(
+    store.view === "completed"
+      ? store.doneGroups.flatMap((g) => (store.collapsed[g.key] ? [] : g.items))
+      : groups.flatMap((g) => (store.collapsed[g.key] ? [] : g.rows.map((r) => r.item))),
+  );
   let sortOpen = $state(false);
 
   function setTab(tab: string) {
@@ -394,6 +399,7 @@
         <button class:on={store.view === "list"} onclick={() => store.setView("list")} title="List (V)"><Icon name="list" size={14} /> List</button>
         <button class:on={store.view === "calendar"} onclick={() => store.setView("calendar")} title="Calendar (V)"><Icon name="calendar" size={14} /> Calendar</button>
         <button class:on={store.view === "gantt"} onclick={() => store.setView("gantt")} title="Gantt chart (V)"><Icon name="gantt" size={14} /> Gantt</button>
+        <button class:on={store.view === "completed"} onclick={() => store.setView("completed")} title="What you finished"><Icon name="check" size={14} /> Done</button>
       </div>
     </header>
 
@@ -403,6 +409,8 @@
       <Calendar />
     {:else if store.view === "gantt" && connected}
       <Gantt bind:this={gantt} />
+    {:else if store.view === "completed" && connected}
+      <Completed />
     {:else}
     <div class="scroll" role="listbox" aria-label="To-dos">
       {#if store.snap && !connected}

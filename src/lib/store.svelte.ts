@@ -15,7 +15,7 @@ export type GroupBy = "source" | "due";
 export type SortBy = "due" | "priority" | "title" | "updated" | "container";
 /** Whether reminder notes show under every row, or only the selected one. */
 export type ShowNotes = "always" | "selected";
-export type View = "list" | "calendar" | "gantt";
+export type View = "list" | "calendar" | "gantt" | "completed";
 export type GanttZoom = "day" | "week" | "month";
 export type GanttGroup = "source" | "area";
 export type CalView = "month" | "week" | "day";
@@ -30,6 +30,16 @@ export interface UndoEntry {
 
 const UNDO_LIMIT = 50;
 
+/** Completed items from one day, for the Completed view. */
+export interface DoneGroup {
+  /** Group key for `store.collapsed`. */
+  key: string;
+  /** `YYYY-MM-DD`, or "" when the source didn't say when it was finished. */
+  day: string;
+  title: string;
+  items: Item[];
+}
+
 export interface Toast {
   id: number;
   text: string;
@@ -39,6 +49,8 @@ export interface Toast {
 
 /** Completed items stay on screen this long so a mis-click can be undone. */
 const LINGER_MS = 4000;
+/** How far back the Completed view reaches; matches `COMPLETED_DAYS` in app.rs. */
+export const COMPLETED_DAYS = 30;
 const FOCUS_SYNC_AFTER_MS = 30_000;
 
 const PREFS_KEY = "organizer.prefs";
@@ -225,6 +237,44 @@ class Store {
     return out;
   });
 
+  /**
+   * Items the backend has as done, newest first: the Completed view's contents.
+   * The cache keeps the last 30 days, so this is a window, not a full history.
+   */
+  completedItems: Item[] = $derived.by(() => {
+    const out: Item[] = [];
+    for (const it of this.snap?.items ?? []) {
+      const o = this.overrides[it.id];
+      const merged = o ? { ...it, ...o } : it;
+      if (merged.completed) out.push(merged);
+    }
+    return out.sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""));
+  });
+
+  /** Completed items under the current area tab and search. */
+  visibleDone: Item[] = $derived.by(() =>
+    this.completedItems.filter((it) => this.inTab(it, this.tab) && this.matches(it)),
+  );
+
+  /**
+   * Completed items grouped by the local day they were finished, newest first.
+   * Items the source gave no completion time for land under "Earlier".
+   */
+  doneGroups: DoneGroup[] = $derived.by(() => {
+    const groups = new Map<string, DoneGroup>();
+    for (const it of this.visibleDone) {
+      const day = it.completedAt ? ymd(new Date(it.completedAt)) : "";
+      let g = groups.get(day);
+      if (!g) {
+        g = { key: `done:${day}`, day, title: day ? formatDue(day) : "Earlier", items: [] };
+        groups.set(day, g);
+      }
+      g.items.push(it);
+    }
+    // `visibleDone` is already newest first, so the days come out in order.
+    return [...groups.values()];
+  });
+
   /** Open-item counts per tab id ("all", "inbox", or a category id). */
   counts: Record<string, number> = $derived.by(() => {
     const c: Record<string, number> = { all: 0, inbox: 0 };
@@ -308,9 +358,12 @@ class Store {
 
   async toggle(item: Item, recordUndo = true) {
     const completed = !item.completed;
-    this.overrides[item.id] = { ...this.overrides[item.id], completed };
+    // The real completion time arrives with the next snapshot; until then this
+    // keeps the item under today in the Completed view rather than "Earlier".
+    const completedAt = completed ? new Date().toISOString() : null;
+    this.overrides[item.id] = { ...this.overrides[item.id], completed, completedAt };
     if (completed) {
-      this.lingering[item.id] = { ...item, completed };
+      this.lingering[item.id] = { ...item, completed, completedAt };
       setTimeout(() => {
         delete this.lingering[item.id];
         if (this.overrides[item.id]?.completed) delete this.overrides[item.id];
@@ -438,7 +491,7 @@ class Store {
     this.calDate = ymd(new Date());
   }
 
-  /** Cycles List → Calendar → Gantt (V). */
+  /** Cycles List → Calendar → Gantt (V); from Completed it goes back to List. */
   nextView() {
     const order: View[] = ["list", "calendar", "gantt"];
     this.setView(order[(order.indexOf(this.view) + 1) % order.length]);
