@@ -12,7 +12,8 @@ import { addDays, addMonths, eventDays, parseYmd, ymd } from "./dates";
 
 export type SourceFilter = "all" | "reminders" | "github";
 export type GroupBy = "source" | "due";
-export type SortBy = "due" | "priority" | "title" | "updated" | "container";
+export type SortBy = "due" | "priority" | "title" | "updated" | "container" | "manual";
+
 /** Whether reminder notes show under every row, or only the selected one. */
 export type ShowNotes = "always" | "selected";
 export type View = "list" | "calendar" | "gantt" | "completed";
@@ -72,6 +73,9 @@ interface Prefs {
   sortBy: SortBy;
   /** Keys of the list-view groups that are collapsed. */
   collapsed: string[];
+  /** Hand-arranged row order, by list-view group key. */
+  order: Record<string, string[]>;
+
   sourceFilter: SourceFilter;
   showNotes: ShowNotes;
   view: View;
@@ -101,6 +105,12 @@ class Store {
   sortBy = $state<SortBy>("due");
   /** Collapsed list-view groups, by group key. */
   collapsed = $state<Record<string, boolean>>({});
+  /**
+   * Hand-arranged order for the "Manual" sort, by list-view group key. Neither
+   * EventKit nor GitHub has a field for this, so it lives here.
+   */
+  order = $state<Record<string, string[]>>({});
+
   showNotes = $state<ShowNotes>("selected");
   view = $state<View>("list");
   calView = $state<CalView>("month");
@@ -122,7 +132,17 @@ class Store {
   toasts = $state<Toast[]>([]);
   /** Item whose "move to area" menu is open. */
   menuFor = $state<string | null>(null);
+  /** The focused row: what the keyboard acts on. */
   selectedId = $state<string | null>(null);
+  /** Where a range selection starts. The focused row moves; this stays put. */
+  anchorId = $state<string | null>(null);
+
+  /**
+   * The multi-selection, by item id. Empty until you Cmd-click, Shift-click or
+   * press Cmd+A, so ordinary clicking and the keyboard behave as they always did.
+   */
+  picked = $state<Record<string, true>>({});
+
   /** Item open in the editor panel. */
   editing = $state<Item | null>(null);
 
@@ -151,6 +171,8 @@ class Store {
     if (p.groupBy) this.groupBy = p.groupBy;
     if (p.sortBy && p.sortBy in SORTS) this.sortBy = p.sortBy;
     if (Array.isArray(p.collapsed)) this.collapsed = Object.fromEntries(p.collapsed.map((k) => [k, true]));
+    if (p.order && typeof p.order === "object") this.order = p.order;
+
     if (p.showNotes) this.showNotes = p.showNotes;
     if (p.view) this.view = p.view;
     if (p.calView) this.calView = p.calView;
@@ -171,6 +193,8 @@ class Store {
           groupBy: this.groupBy,
           sortBy: this.sortBy,
           collapsed: Object.keys(this.collapsed).filter((k) => this.collapsed[k]),
+          order: this.order,
+
           sourceFilter: this.sourceFilter,
           showNotes: this.showNotes,
           view: this.view,
@@ -375,6 +399,7 @@ class Store {
     this.tab = tab;
     this.selectedId = null;
     this.menuFor = null;
+    this.clearPicked();
     this.savePrefs();
   }
 
@@ -392,6 +417,198 @@ class Store {
   toggleGroup(key: string) {
     if (this.collapsed[key]) delete this.collapsed[key];
     else this.collapsed[key] = true;
+    this.savePrefs();
+  }
+
+  // ---- multi-selection ------------------------------------------------------
+
+  /** The selected items, open or completed. Ids with no item left are ignored. */
+  pickedItems: Item[] = $derived.by(() => {
+    const out = new Map<string, Item>();
+    for (const it of [...this.items, ...this.completedItems]) {
+      if (this.picked[it.id] && !out.has(it.id)) out.set(it.id, it);
+    }
+    return [...out.values()];
+  });
+
+  get pickedCount() {
+    return Object.keys(this.picked).length;
+  }
+
+  /** A plain click or an arrow key: one focused row and no multi-selection. */
+  focus(id: string | null) {
+    this.selectedId = id;
+    this.anchorId = id;
+    this.menuFor = null;
+    this.clearPicked();
+  }
+
+  /** Cmd-click: adds or removes one row, and moves the range anchor to it. */
+  togglePicked(id: string) {
+    if (this.picked[id]) delete this.picked[id];
+    else this.picked[id] = true;
+    this.selectedId = id;
+    this.anchorId = id;
+    this.menuFor = null;
+  }
+
+  /**
+   * Shift-click or Shift+arrow: every row between the anchor and `id`. The
+   * anchor stays where the range began, so the selection grows and shrinks.
+   */
+  pickRange(rowIds: string[], id: string) {
+    const to = rowIds.indexOf(id);
+    if (to < 0) return;
+    if (!this.anchorId || !rowIds.includes(this.anchorId)) this.anchorId = this.selectedId ?? id;
+    const from = rowIds.indexOf(this.anchorId);
+    const [lo, hi] = from < 0 ? [to, to] : [Math.min(from, to), Math.max(from, to)];
+    this.pick(rowIds.slice(lo, hi + 1));
+    this.selectedId = id;
+  }
+
+  /** Replaces the selection, e.g. from Cmd+A. */
+  pick(ids: string[]) {
+    this.picked = Object.fromEntries(ids.map((id) => [id, true as const]));
+    this.menuFor = null;
+  }
+
+  clearPicked() {
+    this.picked = {};
+  }
+
+  /** Whether all of `ids` are already selected, which is how Cmd+A widens. */
+  allPicked(ids: string[]) {
+    return ids.length > 0 && ids.every((id) => this.picked[id]);
+  }
+
+  /**
+   * Runs `change` over every item, carrying on when one fails, and reports the
+   * failures once. Returns what worked, so a batch's undo only reverses those.
+   */
+  private async eachItem(items: Item[], change: (it: Item) => Promise<unknown>): Promise<Item[]> {
+    const ok: Item[] = [];
+    const failed: Item[] = [];
+    let reason = "";
+    for (const it of items) {
+      try {
+        await change(it);
+        ok.push(it);
+      } catch (e) {
+        failed.push(it);
+        if (!reason) reason = errorText(e);
+      }
+    }
+    if (failed.length) {
+      const what = failed.length === 1 ? `“${failed[0].title}”` : `${failed.length} of ${items.length} items`;
+      this.toast(`Couldn't change ${what}: ${reason}`);
+    }
+    return ok;
+  }
+
+  /** Completes or reopens every selected item, under one undo entry. */
+  async completePicked(completed: boolean) {
+    const targets = this.pickedItems.filter((it) => it.kind !== "pullRequest" && it.completed !== completed);
+    if (!targets.length) return;
+    // `toggle` flips whatever it is given, so hand it the opposite each time.
+    const flip = (want: boolean) => (it: Item) => this.toggle({ ...it, completed: !want }, false);
+    const ok = await this.eachItem(targets, flip(completed));
+    if (ok.length) {
+      this.record(
+        `${completed ? "complete" : "reopen"} ${plural(ok.length)}`,
+        () => this.eachItem(ok, flip(!completed)),
+        () => this.eachItem(ok, flip(completed)),
+      );
+    }
+    this.clearPicked();
+    await this.refresh();
+  }
+
+  /** Moves every selected item to one area, under one undo entry. */
+  async categorizePicked(category: string | null) {
+    const targets = this.pickedItems;
+    if (!targets.length) return;
+    const restores = new Map(targets.map((it) => [it.id, restorePatch(it)] as const));
+    const ok = await this.eachItem(targets, (it) => this.setCategory(it, category, false));
+    if (ok.length) {
+      const name = this.categories.find((c) => c.id === category)?.name ?? "Inbox";
+      this.record(
+        `move ${plural(ok.length)} to ${name}`,
+        () => this.eachItem(ok, (it) => api.updateItem(it.id, restores.get(it.id)!, it)),
+        () => this.eachItem(ok, (it) => api.setCategory(it.id, category)),
+      );
+    }
+    this.clearPicked();
+    await this.refresh();
+  }
+
+  /** Reschedules the selected items that can be rescheduled, under one undo entry. */
+  async reschedulePicked(due: string) {
+    const targets = this.pickedItems.filter((it) => this.canReschedule(it));
+    if (!targets.length) {
+      this.toast("None of those can be rescheduled here.", "info");
+      return;
+    }
+    const before = new Map(targets.map((it) => [it.id, it.due ?? ""] as const));
+    /**
+     * Issues only have a date. A reminder keeps the time of day it already
+     * had, since this moves the day rather than rewriting the reminder.
+     */
+    const to = (it: Item) => {
+      if (!due) return ""; // clearing the date
+      if (it.kind !== "reminder") return due.slice(0, 10); // issues carry a date only
+      if (due.length > 10) return due; // the caller named a time
+      const old = it.due ?? "";
+      return old.length > 10 ? due + old.slice(10) : due;
+    };
+
+    const ok = await this.eachItem(targets, (it) => this.setDates(it, undefined, to(it), false));
+    if (ok.length) {
+      this.record(
+        `reschedule ${plural(ok.length)}`,
+        () => this.eachItem(ok, (it) => api.setDates(it.id, null, before.get(it.id) ?? "", it)),
+        () => this.eachItem(ok, (it) => api.setDates(it.id, null, to(it), it)),
+      );
+    }
+    this.clearPicked();
+    await this.refresh();
+  }
+
+  /**
+   * Deletes the selected items: a reminder goes for good, an issue is closed as
+   * not planned. Nothing here can be undone, which is why the bar asks first.
+   */
+  async deletePicked() {
+    const targets = this.pickedItems.filter((it) => canDelete(it));
+    if (!targets.length) return;
+    const ok = await this.eachItem(targets, (it) => api.discardItem(it.id));
+    this.clearPicked();
+    await this.refresh();
+    if (ok.length) this.toast(`Deleted ${plural(ok.length)}.`, "info");
+  }
+
+  // ---- hand-arranged order --------------------------------------------------
+
+  /** `items` in the group's saved order. Anything new keeps its sort place and goes last. */
+  orderIn(key: string, items: Item[]): Item[] {
+    const saved = this.order[key];
+    if (!saved?.length) return items;
+    const rank = new Map(saved.map((id, i) => [id, i] as const));
+    // Sorting is stable, so items with no saved place hold their relative order.
+    return [...items].sort((a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity));
+  }
+
+  /** Records a drag. `ids` is that group's complete new order. */
+  setOrder(key: string, ids: string[]) {
+    // A drag is a good moment to forget items that no longer exist, so the
+    // saved order can't grow forever.
+    const live = new Set(this.items.map((it) => it.id));
+    const next: Record<string, string[]> = { [key]: ids.filter((id) => live.has(id)) };
+    for (const [k, v] of Object.entries(this.order)) {
+      if (k === key) continue;
+      const kept = v.filter((id) => live.has(id));
+      if (kept.length) next[k] = kept;
+    }
+    this.order = next;
     this.savePrefs();
   }
 
@@ -467,27 +684,27 @@ class Store {
     }
   }
 
-  async setCategory(item: Item, category: string | null) {
+  async setCategory(item: Item, category: string | null, recordUndo = true) {
     const prev = item.categories;
     this.overrides[item.id] = { ...this.overrides[item.id], categories: category ? [category] : [] };
     try {
       await api.setCategory(item.id, category);
-      // Moving an area rewrites labels (GitHub) or list, notes and title (Reminders); undo restores them.
-      const restore: ItemPatch =
-        item.kind === "reminder"
-          ? { listId: item.containerId, title: item.title, body: item.body ?? "" }
-          : { labels: item.labels.map((l) => l.name) };
-      const name = this.categories.find((c) => c.id === category)?.name ?? "Inbox";
-      this.record(
-        `move “${item.title}” to ${name}`,
-        () => api.updateItem(item.id, restore, item),
-        () => api.setCategory(item.id, category),
-      );
-      await this.refresh();
+      if (recordUndo) {
+        const name = this.categories.find((c) => c.id === category)?.name ?? "Inbox";
+        this.record(
+          `move “${item.title}” to ${name}`,
+          () => api.updateItem(item.id, restorePatch(item), item),
+          () => api.setCategory(item.id, category),
+        );
+        await this.refresh();
+      }
     } catch (e) {
       this.overrides[item.id] = { ...this.overrides[item.id], categories: prev };
+      // In a batch the caller counts the failures and reports them once.
+      if (!recordUndo) throw e;
       this.toast(errorText(e));
     } finally {
+
       // Let the fresh snapshot speak for itself.
       setTimeout(() => {
         const o = this.overrides[item.id];
@@ -570,6 +787,7 @@ class Store {
   setView(view: View) {
     this.view = view;
     this.menuFor = null;
+    this.clearPicked();
     this.savePrefs();
   }
 
@@ -597,7 +815,8 @@ class Store {
    * Changes an item's start and/or due date, with undo. `undefined` leaves a
    * date alone; `""` clears it.
    */
-  async setDates(item: Item, start: string | undefined, due: string | undefined) {
+  async setDates(item: Item, start: string | undefined, due: string | undefined, recordUndo = true) {
+
     const prev = { start: item.start ?? "", due: item.due ?? "" };
     const changed: Partial<Item> = {};
     if (start !== undefined) changed.start = start || null;
@@ -606,21 +825,26 @@ class Store {
     const arg = (v: string | undefined) => (v === undefined ? null : v);
     try {
       const updated = await api.setDates(item.id, arg(start), arg(due), item);
-      this.record(
-        `reschedule “${item.title}”`,
-        () =>
-          api.setDates(
-            item.id,
-            start === undefined ? null : prev.start,
-            due === undefined ? null : prev.due,
-            updated,
-          ),
-        () => api.setDates(item.id, arg(start), arg(due), item),
-      );
-      await this.refresh();
+      if (recordUndo) {
+        this.record(
+          `reschedule “${item.title}”`,
+          () =>
+            api.setDates(
+              item.id,
+              start === undefined ? null : prev.start,
+              due === undefined ? null : prev.due,
+              updated,
+            ),
+          () => api.setDates(item.id, arg(start), arg(due), item),
+        );
+        await this.refresh();
+      }
     } catch (e) {
+      // In a batch the caller counts the failures and reports them once.
+      if (!recordUndo) throw e;
       this.toast(errorText(e));
     } finally {
+
       const o = this.overrides[item.id];
       if (o) {
         delete o.start;
@@ -712,6 +936,7 @@ export const SORT_NAMES: Record<SortBy, string> = {
   title: "Title",
   updated: "Last updated",
   container: "List / repo",
+  manual: "Manual",
 };
 
 /** Each sort falls back to the due-date order so equal keys stay stable. */
@@ -721,9 +946,36 @@ const SORTS: Record<SortBy, (a: Item, b: Item) => number> = {
   title: (a, b) => a.title.localeCompare(b.title) || compareItems(a, b),
   updated: (a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "") || compareItems(a, b),
   container: (a, b) => a.containerName.localeCompare(b.containerName) || compareItems(a, b),
+  // The hand-arranged order is per group, so it is applied where the groups are
+  // built (`store.orderIn`). Anything with no saved place falls back to due date.
+  manual: (a, b) => compareItems(a, b),
 };
 
+/** `n items`, or `1 item`. */
+function plural(n: number) {
+  return `${n} item${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * Whether `discard_item` can take this: it removes a reminder and closes an
+ * issue as not planned, but has nothing to do for a draft or a pull request.
+ */
+export function canDelete(item: Item) {
+  return item.kind === "reminder" || item.kind === "issue";
+}
+
+/**
+ * Undoes a move between areas. Moving rewrites GitHub labels, or a reminder's
+ * list, title and notes, so putting it back means restoring what they were.
+ */
+function restorePatch(item: Item): ItemPatch {
+  return item.kind === "reminder"
+    ? { listId: item.containerId, title: item.title, body: item.body ?? "" }
+    : { labels: item.labels.map((l) => l.name) };
+}
+
 /** Due date first (soonest, undated last), then priority, then most recently updated. */
+
 function compareItems(a: Item, b: Item) {
   if (a.due !== b.due) {
     if (!a.due) return 1;

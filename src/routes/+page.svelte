@@ -22,6 +22,7 @@
   import QuickAdd from "$lib/components/QuickAdd.svelte";
   import Settings from "$lib/components/Settings.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
+  import SelectionBar from "$lib/components/SelectionBar.svelte";
 
   let addInput = $state<HTMLInputElement>();
   let searchInput = $state<HTMLInputElement>();
@@ -65,11 +66,15 @@
     items: Item[];
     /** `items` in display order, with sub-issues placed under their parents. */
     rows: Row[];
+    /** How many top-level rows the group has; a drop can land after the last.  */
+    rootCount: number;
   }
 
   interface Row {
     item: Item;
     depth: number;
+    /** Position among the group's top-level rows, or null for a sub-issue. */
+    rootIndex: number | null;
     /** The parent's title when the parent isn't shown directly above. */
     parentTitle: string | null;
   }
@@ -96,6 +101,7 @@
     }
     const rows: Row[] = [];
     const seen = new Set<string>();
+    let rootsSeen = 0;
     const visit = (it: Item, depth: number) => {
       if (seen.has(it.id)) return; // guards against cycles
       seen.add(it.id);
@@ -103,8 +109,10 @@
       rows.push({
         item: it,
         depth,
+        rootIndex: nestedHere ? null : rootsSeen++,
         parentTitle: !nestedHere && it.parentId ? (byId.get(it.parentId)?.title ?? null) : null,
       });
+
       for (const c of children.get(it.id) ?? []) visit(c, depth + 1);
     };
     for (const r of roots) visit(r, 0);
@@ -122,16 +130,22 @@
     none: "No date",
   };
 
+  /** Finishes a group: the hand-arranged order when it applies, then nesting. */
+  function build(g: Group, nested: boolean): Group {
+    const items = store.sortBy === "manual" ? store.orderIn(g.key, g.items) : g.items;
+    const rows = nest(items, nested);
+    return { ...g, rows, rootCount: rows.filter((r) => r.rootIndex !== null).length };
+  }
+
   const groups: Group[] = $derived.by(() => {
     const map = new Map<string, Group>();
     if (store.groupBy === "due") {
       for (const b of Object.keys(bucketNames) as DueBucket[])
-        map.set(b, { key: b, title: bucketNames[b], icon: "calendar", items: [], rows: [] });
+        map.set(b, { key: b, title: bucketNames[b], icon: "calendar", items: [], rows: [], rootCount: 0 });
       for (const it of store.visible) map.get(dueBucket(it.due))!.items.push(it);
-      return [...map.values()]
-        .filter((g) => g.items.length)
-        .map((g) => ({ ...g, rows: nest(g.items, false) }));
+      return [...map.values()].filter((g) => g.items.length).map((g) => build(g, false));
     }
+
     const lists = new Map(store.snap?.reminderLists.map((l) => [l.id, l]) ?? []);
     for (const it of store.visible) {
       const key = it.kind === "reminder" ? `rem:${it.containerId}` : `gh:${it.containerName}`;
@@ -144,6 +158,7 @@
           color: it.kind === "reminder" ? lists.get(it.containerId)?.color : null,
           items: [],
           rows: [],
+          rootCount: 0,
         };
         map.set(key, g);
       }
@@ -155,8 +170,77 @@
         const br = b.key.startsWith("rem:") ? 0 : 1;
         return ar - br || a.title.localeCompare(b.title);
       })
-      .map((g) => ({ ...g, rows: nest(g.items, true) }));
+      .map((g) => build(g, true));
   });
+
+  /** Rows can be dragged into a hand-arranged order only while that sort is on. */
+  const manual = $derived(store.sortBy === "manual" && store.view === "list" && store.tab !== "today");
+
+  let dragId = $state<string | null>(null);
+  let dragKey = $state<string | null>(null);
+  /** Where the dragged row would land, counted in top-level rows. */
+  let dropIndex = $state(-1);
+
+  function onRowDragStart(e: DragEvent, g: Group, item: Item) {
+    dragId = item.id;
+    dragKey = g.key;
+    dropIndex = -1;
+    if (!e.dataTransfer) return;
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", item.id);
+    // Drag the whole row rather than the handle it started from.
+    const row = document.getElementById(`row-${item.id}`);
+    if (row) e.dataTransfer.setDragImage(row, 24, row.offsetHeight / 2);
+  }
+
+  function onRowDragOver(e: DragEvent, g: Group, rootIndex: number) {
+    if (!dragId || dragKey !== g.key) return; // rows stay in their own group
+    e.preventDefault();
+    const box = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    dropIndex = e.clientY < box.top + box.height / 2 ? rootIndex : rootIndex + 1;
+  }
+
+  function onRowDrop(e: DragEvent, g: Group) {
+    if (!dragId || dragKey !== g.key || dropIndex < 0) return endDrag();
+    e.preventDefault();
+    const roots = g.rows.filter((r) => r.rootIndex !== null).map((r) => r.item.id);
+    const from = roots.indexOf(dragId);
+    if (from >= 0) {
+      const rest = roots.filter((id) => id !== dragId);
+      // Removing the row first shifts every later position down by one.
+      const at = dropIndex > from ? dropIndex - 1 : dropIndex;
+      rest.splice(Math.max(0, Math.min(rest.length, at)), 0, dragId);
+      // Sub-issues travel with the parent they sit under.
+      const kids = new Map<string, string[]>();
+      for (const r of g.rows) {
+        const parent = r.depth > 0 ? r.item.parentId : null;
+        if (parent) kids.set(parent, [...(kids.get(parent) ?? []), r.item.id]);
+      }
+      const expand = (id: string): string[] => [id, ...(kids.get(id) ?? []).flatMap(expand)];
+      store.setOrder(g.key, rest.flatMap(expand));
+    }
+    endDrag();
+  }
+
+  function endDrag() {
+    dragId = null;
+    dragKey = null;
+    dropIndex = -1;
+  }
+
+  /** A click on a row: plain focuses it, Cmd adds to the selection, Shift extends it. */
+  function onRowClick(e: MouseEvent, item: Item) {
+    if (e.shiftKey) store.pickRange(navRows.map((r) => r.id), item.id);
+    else if (e.metaKey || e.ctrlKey) store.togglePicked(item.id);
+    else store.focus(store.selectedId === item.id && !store.pickedCount ? null : item.id);
+  }
+
+  /** Cmd+A takes the focused row's group first, then everything on screen. */
+  function selectAll() {
+    const group = groups.find((g) => g.rows.some((r) => r.item.id === store.selectedId));
+    const inGroup = group?.rows.map((r) => r.item.id) ?? [];
+    store.pick(inGroup.length && !store.allPicked(inGroup) ? inGroup : navRows.map((r) => r.id));
+  }
 
   /** The items you can act on with the keyboard, in screen order. */
   const flat = $derived(
@@ -175,14 +259,16 @@
   );
   let sortOpen = $state(false);
 
-  async function moveSelection(delta: number) {
+  async function moveSelection(delta: number, extend = false) {
     if (!navRows.length) return;
     const i = navRows.findIndex((r) => r.id === store.selectedId);
     const last = navRows.length - 1;
     const next = i < 0 ? (delta > 0 ? 0 : last) : Math.min(last, Math.max(0, i + delta));
-    store.selectedId = navRows[next].id;
+    const id = navRows[next].id;
+    if (extend) store.pickRange(navRows.map((r) => r.id), id);
+    else store.focus(id);
     await tick();
-    document.getElementById(`row-${CSS.escape(navRows[next].id)}`)?.scrollIntoView({ block: "nearest" });
+    document.getElementById(`row-${CSS.escape(id)}`)?.scrollIntoView({ block: "nearest" });
   }
 
   function onkeydown(e: KeyboardEvent) {
@@ -216,9 +302,13 @@
       } else if (e.key === ",") {
         e.preventDefault();
         store.openSettings();
+      } else if (e.key === "a") {
+        e.preventDefault();
+        selectAll();
       }
       return;
     }
+
     if (typing || store.settingsOpen) return;
     if (e.key === "v") {
       // Today is a tab, not a view, so V steps out of it rather than cycling.
@@ -234,20 +324,26 @@
       case "ArrowDown":
       case "j":
         e.preventDefault();
-        moveSelection(1);
+        moveSelection(1, e.shiftKey);
         break;
       case "ArrowUp":
       case "k":
         e.preventDefault();
-        moveSelection(-1);
+        moveSelection(-1, e.shiftKey);
         break;
       case " ":
       case "x":
-        if (selected && selected.kind !== "pullRequest") {
+        // With a multi-selection the key works on all of it: a selection that
+        // is entirely done reopens, anything else completes.
+        if (store.pickedCount) {
+          e.preventDefault();
+          store.completePicked(!store.pickedItems.every((it) => it.completed));
+        } else if (selected && selected.kind !== "pullRequest") {
           e.preventDefault();
           store.toggle(selected);
         }
         break;
+
       case "Enter":
       case "e":
         if (selected) {
@@ -271,8 +367,11 @@
         break;
       case "Escape":
         store.menuFor = null;
-        store.selectedId = null;
+        // Esc backs out one step at a time: the selection, then the focus.
+        if (store.pickedCount) store.clearPicked();
+        else store.selectedId = null;
         break;
+
     }
   }
 
@@ -488,21 +587,39 @@
               <span class="faint">{g.items.filter((i) => !i.completed).length}</span>
             </button>
             {#if !store.collapsed[g.key]}
-              {#each g.rows as { item, depth, parentTitle } (item.id)}
-                <div id="row-{item.id}">
+              {#each g.rows as { item, depth, parentTitle, rootIndex } (item.id)}
+                <div
+                  id="row-{item.id}"
+                  class="rowwrap"
+                  role="presentation"
+
+                  class:dropbefore={dragKey === g.key && dropIndex === rootIndex}
+                  class:dropafter={dragKey === g.key &&
+                    dropIndex === g.rootCount &&
+                    rootIndex === g.rootCount - 1}
+                  ondragover={rootIndex === null ? undefined : (e) => onRowDragOver(e, g, rootIndex)}
+                  ondrop={(e) => onRowDrop(e, g)}
+                >
                   <ItemRow
                     {item}
                     {depth}
                     {parentTitle}
                     selected={store.selectedId === item.id}
+                    picked={!!store.picked[item.id]}
                     showContainer={store.groupBy !== "source"}
-                    onselect={() => (store.selectedId = store.selectedId === item.id ? null : item.id)}
+                    onselect={(e) => onRowClick(e, item)}
+                    ondragstart={manual && rootIndex !== null ? (e) => onRowDragStart(e, g, item) : undefined}
+                    ondragend={endDrag}
                   />
                 </div>
               {/each}
             {/if}
+
           </section>
         {/each}
+      {/if}
+      {#if store.pickedCount}
+        <SelectionBar />
       {/if}
     </div>
     {/if}
@@ -682,6 +799,28 @@
   .group {
     margin-bottom: 8px;
   }
+  .rowwrap {
+    position: relative;
+  }
+  /* Where a dragged row would land. Drawn over the gap so nothing shifts. */
+  .rowwrap.dropbefore::before,
+  .rowwrap.dropafter::after {
+    content: "";
+    position: absolute;
+    left: 10px;
+    right: 10px;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--accent);
+    z-index: 3;
+  }
+  .rowwrap.dropbefore::before {
+    top: -1px;
+  }
+  .rowwrap.dropafter::after {
+    bottom: -1px;
+  }
+
   .group-head {
     position: sticky;
     top: 0;
