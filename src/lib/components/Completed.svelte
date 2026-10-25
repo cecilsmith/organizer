@@ -1,7 +1,20 @@
 <script lang="ts">
+  import type { Item } from "$lib/api";
   import { store, COMPLETED_DAYS } from "$lib/store.svelte";
   import Icon from "./Icon.svelte";
   import ItemRow from "./ItemRow.svelte";
+  import SelectionBar from "./SelectionBar.svelte";
+
+  /** Every row on screen, in order, so Shift-click knows what lies between. */
+  const rowIds = $derived(
+    store.doneGroups.flatMap((g) => (store.collapsed[g.key] ? [] : g.items.map((it) => it.id))),
+  );
+
+  function onRowClick(e: MouseEvent, item: Item) {
+    if (e.shiftKey) store.pickRange(rowIds, item.id);
+    else if (e.metaKey || e.ctrlKey) store.togglePicked(item.id);
+    else store.focus(store.selectedId === item.id && !store.pickedCount ? null : item.id);
+  }
 
   const tabName = $derived(
     store.tab === "all"
@@ -38,16 +51,21 @@
               <ItemRow
                 {item}
                 selected={store.selectedId === item.id}
-                onselect={() => (store.selectedId = store.selectedId === item.id ? null : item.id)}
+                picked={!!store.picked[item.id]}
+                onselect={(e) => onRowClick(e, item)}
               />
             </div>
+
           {/each}
         {/if}
       </section>
     {/each}
     <p class="note faint small">
-      The last {COMPLETED_DAYS} days. Uncheck an item to reopen it — that goes back to Reminders, GitHub or GitLab too.
+      The last {COMPLETED_DAYS} days. Uncheck an item to reopen it, and it goes back to Reminders, GitHub or GitLab too.
     </p>
+  {/if}
+  {#if store.pickedCount}
+    <SelectionBar />
   {/if}
 </div>
 

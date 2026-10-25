@@ -8,19 +8,27 @@
   let {
     item,
     selected = false,
+    picked = false,
     showContainer = true,
     depth = 0,
     parentTitle = null,
     onselect,
+    ondragstart,
+    ondragend,
   }: {
     item: Item;
     selected?: boolean;
+    /** In the multi-selection, so a bulk action will include it. */
+    picked?: boolean;
     showContainer?: boolean;
     /** Nesting level for sub-issues shown under their parent. */
     depth?: number;
     /** Set when the parent isn't shown directly above this row. */
     parentTitle?: string | null;
-    onselect: () => void;
+    onselect: (e: MouseEvent) => void;
+    /** Set to show a drag handle; sub-issues move with their parent instead. */
+    ondragstart?: (e: DragEvent) => void;
+    ondragend?: () => void;
   } = $props();
 
   const menuOpen = $derived(store.menuFor === item.id);
@@ -68,19 +76,37 @@
   style:--depth={depth}
   class:child={depth > 0}
   class:selected
+  class:picked
   class:done={item.completed}
   role="option"
-  aria-selected={selected}
+  aria-selected={selected || picked}
   tabindex="-1"
-  onclick={() => {
-    onselect();
+  onclick={(e) => onselect(e)}
+  onmousedown={(e) => {
+    // Shift-click extends the selection of rows, not of the text on them.
+    if (e.shiftKey) e.preventDefault();
   }}
+
+
   ondblclick={() => store.edit(item)}
   onkeydown={() => {}}
 >
+  {#if ondragstart}
+    <span
+      class="grip"
+      draggable="true"
+      ondragstart={(e) => ondragstart?.(e)}
+      ondragend={() => ondragend?.()}
+      title="Drag to reorder"
+      aria-hidden="true"
+    >
+      <Icon name="grip" size={12} />
+    </span>
+  {/if}
   {#if canComplete}
     <button
       class="check"
+
       style:--c={color}
       class:checked={item.completed}
       onclick={(e) => {
@@ -229,6 +255,32 @@
   .row.selected {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
+  /* Part of a multi-selection: stronger than the focused row, and marked on
+     the left edge so a long run of them reads as one block. */
+  .row.picked {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .grip {
+    display: flex;
+    align-items: center;
+    align-self: stretch;
+    margin: -7px 0 -7px -6px;
+    padding: 0 1px;
+    color: var(--text-3);
+    cursor: grab;
+    opacity: 0;
+    transition: opacity 0.12s;
+  }
+  .grip:active {
+    cursor: grabbing;
+  }
+  .row:hover .grip,
+  .row.selected .grip,
+  .row.picked .grip {
+    opacity: 1;
+  }
+
   .row.done .title {
     color: var(--text-3);
     text-decoration: line-through;
